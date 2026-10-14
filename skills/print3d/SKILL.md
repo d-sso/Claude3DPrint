@@ -64,7 +64,7 @@ After each run, read the JSON:
   - The limits come from the active printer profile (`checks.thresholds` and `checks.sources` show the values and where they came from). Never lower a threshold to make a check pass:
     - Printer-wide calibrated values go in the profile with `print3d profile set checks.min_wall=...`, and only when the user has measured them.
     - For a deliberate thin feature in one model (a flex hinge, a breakaway tab), add `CHECKS = {"min_wall": 0.6}` to that model with a comment giving the reason.
-  - Thickness is measured with rays from the surface, so it can read high at sharp inside corners. If the parameters say a wall is thin, trust the parameters.
+  - Thickness is measured with rays from the surface, so it can read high at sharp inside corners and on curved thin shells (a thin dome, tube or bowl wall). If the parameters say a wall is thin, trust the parameters.
 - <!-- #4: render and inspect the preview here -->
 
 Repeat until the numbers match. Don't hand over a part whose dimensions you haven't checked.
