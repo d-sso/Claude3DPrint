@@ -51,7 +51,8 @@ def build(p):
 ```
 
 ## Uninstall
-1. Delete the link `~/.claude/skills/print3d`. This only removes the junction, not the repo.
+1. Remove the link with `cmd /c rmdir "$HOME\.claude\skills\print3d"`. This only removes the junction, not the repo.
+   Do not use `Remove-Item -Recurse` or Explorer's "delete folder contents" on the link: that can delete the repo's files.
 2. Delete `%LOCALAPPDATA%\print3d` (venv and config).
 3. Optionally, delete your parts library.
 
