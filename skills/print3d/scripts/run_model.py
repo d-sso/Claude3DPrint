@@ -11,6 +11,7 @@ import importlib.util
 from importlib.machinery import SourceFileLoader
 import json
 import math
+import numbers
 import os
 import re
 import sys
@@ -354,36 +355,53 @@ def resolve_checks(module, config_checks, raw_checks, profile):
 
 
 def _is_size(value):
+    """(x, y, z) of finite real numbers; numpy scalars count, bools (incl. numpy bools, not Real) don't."""
     return (
         isinstance(value, (tuple, list))
         and len(value) == 3
-        and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in value)
+        and all(isinstance(v, numbers.Real) and not isinstance(v, bool) and math.isfinite(v) for v in value)
     )
+
+
+def _def_line(func, model_path):
+    """Line where a model function is defined, for errors that have no model frame; None if unknown or elsewhere."""
+    code = getattr(func, "__code__", None)
+    if code is None or not _same_file(code.co_filename, model_path):
+        return None
+    return code.co_firstlineno
 
 
 def expected_sizes(module, params, parts):
     """Call the model's optional expected(p); returns {part name: (x, y, z)} or None when it isn't defined."""
     if not hasattr(module, "expected"):
         return None
+    func = module.expected
+    model_path = getattr(module, "__file__", "")
+    def_line = _def_line(func, model_path)
     with contextlib.redirect_stdout(sys.stderr):
         try:
-            sizes = module.expected(dict(params))
+            sizes = func(dict(params))
         except (Exception, SystemExit) as exc:
-            raise RunError("check", f"expected(): {type(exc).__name__}: {exc}", exc=exc) from exc
+            in_model = bool(_model_frames(exc, model_path))
+            raise RunError(
+                "check", f"expected(): {type(exc).__name__}: {exc}", exc=exc, line=None if in_model else def_line
+            ) from exc
     example = 'e.g. return {"main": (p["length"], p["width"], p["height"])}'
     if not isinstance(sizes, dict):
         raise RunError(
-            "check", f"expected() must return a dict of part name -> (x, y, z) in mm, got {type(sizes).__name__}; {example}"
+            "check", f"expected() must return a dict of part name -> (x, y, z) in mm, got {type(sizes).__name__}; {example}",
+            line=def_line,
         )
     unknown = sorted(set(sizes) - set(parts))
     if unknown:
         raise RunError(
-            "check", f"expected() names unknown part(s) {', '.join(map(repr, unknown))}; parts are {', '.join(map(repr, parts))}"
+            "check", f"expected() names unknown part(s) {', '.join(map(repr, unknown))}; parts are {', '.join(map(repr, parts))}",
+            line=def_line,
         )
     for name, size in sizes.items():
         if not _is_size(size):
-            raise RunError("check", f"expected()[{name!r}] must be (x, y, z) in mm, got {size!r}; {example}")
-    return sizes
+            raise RunError("check", f"expected()[{name!r}] must be (x, y, z) in mm, got {size!r}; {example}", line=def_line)
+    return {name: tuple(float(v) for v in size) for name, size in sizes.items()}
 
 
 def stage_check(module, params, parts, thresholds, sources, result):

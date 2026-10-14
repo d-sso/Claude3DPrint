@@ -34,8 +34,8 @@ def test_layers_apply_in_order_and_record_sources():
 @pytest.mark.parametrize(
     "layers, needle",
     [
-        (({"bogus": 1}, None, None), "Unknown check threshold(s) in config: bogus. Valid: bed_x"),
-        ((None, {"min_wal": 1}, None), "in model: min_wal"),
+        (({"bogus": 1}, None, None), "Unknown check threshold(s) in config.toml [checks]: bogus. Valid: bed_x"),
+        ((None, {"min_wal": 1}, None), "in the model's CHECKS: min_wal"),
         ((None, None, {"min_wall": "abc"}), "Check threshold 'min_wall': cannot parse 'abc' as float"),
         ((None, {"min_wall": True}, None), "expected float, got bool"),
         (({"min_wall": "1"}, None, None), "expected float, got str"),
@@ -51,6 +51,22 @@ def test_bad_thresholds_raise_clear_errors(layers, needle):
     assert needle in str(err.value)
 
 
+@pytest.mark.parametrize(
+    "layers, label",
+    [
+        (({"min_wall": "1"}, None, None), "(from config.toml [checks])"),
+        ((None, {"min_wall": "1"}, None), "(from the model's CHECKS)"),
+        ((None, None, {"min_wall": "abc"}), "(from --check)"),
+        ((None, None, {"samples": "50"}), "(from --check)"),
+        ((None, {"min_wall": 0}, None), "(from the model's CHECKS)"),
+    ],
+)
+def test_threshold_value_errors_name_their_layer(layers, label):
+    with pytest.raises(ValueError) as err:
+        resolve_thresholds(*layers)
+    assert str(err.value).endswith(label)
+
+
 PROFILE = {
     "name": "test-printer",
     "values": {
@@ -58,6 +74,13 @@ PROFILE = {
         "checks": {"bed_margin": 3.0, "min_wall": 1.0, "min_feature": 0.5, "overhang_angle": 50.0},
     },
 }
+
+
+def test_bad_profile_threshold_names_the_profile():
+    bad = {"name": "bad", "values": {**PROFILE["values"], "checks": {**PROFILE["values"]["checks"], "min_wall": "1.0"}}}
+    with pytest.raises(ValueError) as err:
+        resolve_thresholds(profile=bad)
+    assert "expected float, got str" in str(err.value) and str(err.value).endswith("(from the printer profile)")
 
 
 def test_profile_layer_sits_between_defaults_and_config():
@@ -159,10 +182,36 @@ def test_open_mesh_fails_sealed_and_skips_ray_checks():
     mesh.update_faces(np.arange(2, len(mesh.faces)))  # remove one side (two triangles)
     report = check_part(mesh, dict(DEFAULTS))
     found = results(report)
-    assert found["sealed"]["status"] == "fail" and "open edges" in found["sealed"]["message"]
+    assert found["sealed"]["status"] == "fail" and "4 open edges" in found["sealed"]["message"]
+    assert "non-manifold" not in found["sealed"]["message"]
     for name in ("wall", "thin", "overhang"):
         assert found[name]["status"] == "skipped" and "not sealed" in found[name]["message"]
     assert report["status"] == "fail" and report["mesh"]["watertight"] is False
+
+
+def edge_touching_boxes():
+    a = trimesh.creation.box((10, 10, 10))
+    b = trimesh.creation.box((10, 10, 10))
+    b.apply_translation((10, 10, 0))  # shares exactly one vertical edge with a
+    mesh = trimesh.util.concatenate([a, b])
+    mesh.merge_vertices()
+    return mesh
+
+
+def test_bodies_touching_along_an_edge_report_non_manifold_not_open():
+    message = results(check_part(edge_touching_boxes(), dict(DEFAULTS)))["sealed"]["message"]
+    assert "1 non-manifold edge (shared by more than two faces)" in message
+    assert "open edge" not in message
+    assert "touch only along an edge" in message and "close the shape" not in message
+
+
+def test_open_and_non_manifold_edges_are_both_reported():
+    mesh = edge_touching_boxes()
+    far_side = (mesh.face_normals[:, 0] < -0.9) & (mesh.triangles_center[:, 0] < -4)
+    mesh.update_faces(~far_side)  # open the -X side of the first box, away from the shared edge
+    message = results(check_part(mesh, dict(DEFAULTS)))["sealed"]["message"]
+    assert "4 open edges" in message and "1 non-manifold edge" in message
+    assert "close the shape" in message and "touch only along an edge" in message
 
 
 def test_filleted_box_has_no_thin_walls():

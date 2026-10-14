@@ -93,3 +93,8 @@ def test_readme_documents_gauges():
 
 def test_skill_md_reads_used_from_printed_coupon_result():
     assert "calibration_coupon.result.json" in read(SKILL / "SKILL.md")
+
+
+def test_skill_documents_thickness_ray_limits():
+    text = read(SKILL / "SKILL.md")
+    assert "sharp inside corners" in text and "curved thin shells" in text

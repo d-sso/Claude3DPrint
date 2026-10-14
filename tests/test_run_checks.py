@@ -115,6 +115,12 @@ def test_unknown_check_key_is_params_error(model):
     assert "min_wal" in result["error"]["message"] and "min_wall" in result["error"]["message"]
 
 
+def test_wrong_type_model_check_names_the_layer(tmp_path):
+    result, code = run(_inline(tmp_path, BOX + "CHECKS = {'min_wall': '0.6'}  # test\n"))
+    assert code == 1 and result["error"]["stage"] == "params"
+    assert "'min_wall'" in result["error"]["message"] and "(from the model's CHECKS)" in result["error"]["message"]
+
+
 def test_malformed_check_pair_is_usage_error(model):
     result, code = run(model("good_box.py"), check_pairs=["min_wall"])
     assert code == 2 and "--check expects key=value" in result["error"]["message"]
@@ -144,8 +150,46 @@ def test_expected_error_points_at_model_line(model):
 )
 def test_bad_expected_return_is_check_error(tmp_path, body, needle):
     result, code = run(_inline(tmp_path, BOX + f"def expected(p):\n    {body}\n"))
-    assert code == 1 and result["error"]["stage"] == "check"
+    assert code == 1 and result["error"]["stage"] == "check" and result["error"]["line"] == 7
     assert needle in result["error"]["message"]
+
+
+def test_expected_signature_error_points_at_def_line(tmp_path):
+    result, code = run(_inline(tmp_path, BOX + "def expected():\n    return {}\n"))
+    assert code == 1 and result["error"]["stage"] == "check"
+    assert "TypeError" in result["error"]["message"] and result["error"]["line"] == 7
+
+
+def test_imported_expected_does_not_report_a_line_from_another_file(tmp_path):
+    # textwrap.dedent raises inside textwrap.py; its line number means nothing in the model file.
+    result, code = run(_inline(tmp_path, BOX + "from textwrap import dedent as expected\n"))
+    assert code == 1 and result["error"]["stage"] == "check" and result["error"]["line"] is None
+
+
+def test_lambda_expected_bad_shape_points_at_its_line(tmp_path):
+    result, code = run(_inline(tmp_path, BOX + "expected = lambda p: (40, 30, 15)\n"))
+    assert code == 1 and "must return a dict" in result["error"]["message"] and result["error"]["line"] == 7
+
+
+NP_BOX = BOX + "import numpy as np\n"
+
+
+def test_expected_accepts_numpy_sizes_and_result_is_json(tmp_path):
+    source = NP_BOX + "def expected(p):\n    return {'main': (np.int64(40), np.float64(30), np.float32(15))}\n"
+    path = _inline(tmp_path, source)
+    result, code = run(path)
+    assert code == 0, result["error"]
+    assert check_status(result)["size"] == "pass"
+    json.dumps(result)  # numpy values must not leak into the report
+    saved = json.loads((path.parent / "out" / f"{path.stem}.result.json").read_text())
+    assert saved["checks"]["status"] == "pass"
+
+
+@pytest.mark.parametrize("bad", ["'15'", "True", "np.bool_(True)", "float('nan')", "float('inf')", "np.float64('nan')"])
+def test_expected_rejects_non_real_or_non_finite_sizes(tmp_path, bad):
+    result, code = run(_inline(tmp_path, NP_BOX + f"def expected(p):\n    return {{'main': (40, 30, {bad})}}\n"))
+    assert code == 1 and result["error"]["stage"] == "check"
+    assert "must be (x, y, z)" in result["error"]["message"]
 
 
 def test_expected_not_callable_is_load_error(tmp_path):

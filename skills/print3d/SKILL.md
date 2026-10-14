@@ -55,7 +55,7 @@ After each run, read the JSON:
   - `warnings` must be empty. If not, the geometry is invalid; simplify the last change.
 - **Printability checks** (`checks` in the JSON) run on every `run`. Read `checks.status`:
   - `fail` → fix the geometry and re-run. Each failing check has a `message`, and its `regions[].center` is a point on the part (mm) that locates the feature:
-    - `sealed`: the mesh is open or inside out. Close the shape or remove zero-thickness faces. Wall, thin and overhang are skipped until this passes.
+    - `sealed`: the mesh is open, inside out, or non-manifold (two bodies touching only along an edge). Close the shape or remove zero-thickness faces; separate touching bodies or fuse them with real overlap. Wall, thin and overhang are skipped until this passes.
     - `size`: the build doesn't match `expected(p)`. Fix the geometry, or fix `expected()` if the intent changed.
     - `bed_fit`: too big for the bed. Scale down, split into parts, or reorient.
     - `wall` (below the profile's `min_wall`): thicken the wall. `thin` (below `min_feature`): thicken or remove the feature, because it will not print.
@@ -64,7 +64,7 @@ After each run, read the JSON:
   - The limits come from the active printer profile (`checks.thresholds` and `checks.sources` show the values and where they came from). Never lower a threshold to make a check pass:
     - Printer-wide calibrated values go in the profile with `print3d profile set checks.min_wall=...`, and only when the user has measured them.
     - For a deliberate thin feature in one model (a flex hinge, a breakaway tab), add `CHECKS = {"min_wall": 0.6}` to that model with a comment giving the reason.
-  - Thickness is measured with rays from the surface, so it can read high at sharp inside corners. If the parameters say a wall is thin, trust the parameters.
+  - Thickness is measured with rays from the surface, so it can read high at sharp inside corners and on curved thin shells (a thin dome, tube or bowl wall). If the parameters say a wall is thin, trust the parameters.
 - <!-- #4: render and inspect the preview here -->
 
 Repeat until the numbers match. Don't hand over a part whose dimensions you haven't checked.
