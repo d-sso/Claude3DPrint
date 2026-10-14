@@ -37,14 +37,14 @@ class RunError(Exception):
         self.line = line
 
 
-def parse_overrides(pairs):
+def parse_overrides(pairs, flag="--set"):
     """Turn ["key=value", ...] into {"key": "value"}; values stay raw text."""
     raw = {}
     for item in pairs:
         key, sep, value = item.partition("=")
         key = key.strip()
         if not sep or not key:
-            raise RunError("usage", f"--set expects key=value, got {item!r}")
+            raise RunError("usage", f"{flag} expects key=value, got {item!r}")
         raw[key] = value.strip()
     return raw
 
@@ -126,6 +126,10 @@ def load_model(path):
             )
     if not callable(getattr(module, "build", None)):
         raise RunError("load", "Model must define a function build(p) that returns the part(s)")
+    if not isinstance(getattr(module, "CHECKS", {}), dict):
+        raise RunError("load", "CHECKS must be a dict of check threshold -> value, e.g. {'min_wall': 0.6}")
+    if hasattr(module, "expected") and not callable(module.expected):
+        raise RunError("load", "expected must be a function expected(p) returning {part name: (x, y, z)}")
     return module
 
 
@@ -273,10 +277,172 @@ def internal_error(stage, exc):
     }
 
 
-def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None, profile=None):
-    """Load, parameterise, build and export one model. Returns (result, exit_code).
+def check_usage(model_path, formats):
+    """Reject a missing or non-.py model, and unknown formats (formats=None when nothing is exported)."""
+    if not model_path.is_file():
+        raise RunError("usage", f"Model file not found: {model_path.as_posix()}")
+    if model_path.suffix.lower() != ".py":
+        raise RunError("usage", f"Model file must be a .py file: {model_path.as_posix()}")
+    if formats is not None:
+        bad = [f for f in formats if f not in ALLOWED_FORMATS]
+        if bad or not formats:
+            raise RunError("usage", f"Unknown format(s) {bad or formats}; choose from {', '.join(ALLOWED_FORMATS)}")
+
+
+def activate_profile(profile):
+    """Activate the given profile, or load and activate the default base profile. Returns the active profile."""
+    if profile is None:
+        try:
+            profile = print3d_profile.load_profile()
+        except print3d_profile.ProfileError as exc:
+            raise RunError("usage", str(exc), exc=exc) from exc
+    print3d_profile.activate(profile)
+    return profile
+
+
+def profile_record(profile):
+    return {
+        "name": profile["name"],
+        "file": profile["file"],
+        "overrides": dict(profile["overrides"]),
+        "used": print3d_profile.used(),
+    }
+
+
+def stage_load(model_path):
+    with contextlib.redirect_stdout(sys.stderr):
+        return load_model(model_path)
+
+
+def stage_params(module, raw, result):
+    params, overrides = merge_parameters(module.PARAMETERS, raw)
+    result["parameters"], result["overrides"] = params, overrides
+    return params
+
+
+def stage_build(module, params, result):
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            built = module.build(dict(params))
+        except (Exception, SystemExit) as exc:
+            raise RunError("build", f"{type(exc).__name__}: {exc}", exc=exc) from exc
+        parts = normalize_parts(built)
+        for name, shape in parts.items():
+            summary = summarize(name, shape)
+            result["parts"].append(summary)
+            if not summary["valid"]:
+                result["warnings"].append(f"Part {name!r} is not a valid solid according to build123d")
+    return parts
+
+
+def stage_export(parts, stem, out, formats, result):
+    out.mkdir(parents=True, exist_ok=True)
+    with contextlib.redirect_stdout(sys.stderr):
+        export_parts(parts, stem, out, formats, result)
+
+
+def resolve_checks(module, config_checks, raw_checks, profile):
+    """Check thresholds: defaults < profile < config [checks] < model CHECKS < --check. Params-stage errors."""
+    import check_model
+
+    try:
+        return check_model.resolve_thresholds(
+            config_checks, getattr(module, "CHECKS", {}), raw_checks, profile=profile
+        )
+    except ValueError as exc:
+        raise RunError("params", str(exc), exc=exc) from exc
+
+
+def _is_size(value):
+    return (
+        isinstance(value, (tuple, list))
+        and len(value) == 3
+        and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in value)
+    )
+
+
+def expected_sizes(module, params, parts):
+    """Call the model's optional expected(p); returns {part name: (x, y, z)} or None when it isn't defined."""
+    if not hasattr(module, "expected"):
+        return None
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            sizes = module.expected(dict(params))
+        except (Exception, SystemExit) as exc:
+            raise RunError("check", f"expected(): {type(exc).__name__}: {exc}", exc=exc) from exc
+    example = 'e.g. return {"main": (p["length"], p["width"], p["height"])}'
+    if not isinstance(sizes, dict):
+        raise RunError(
+            "check", f"expected() must return a dict of part name -> (x, y, z) in mm, got {type(sizes).__name__}; {example}"
+        )
+    unknown = sorted(set(sizes) - set(parts))
+    if unknown:
+        raise RunError(
+            "check", f"expected() names unknown part(s) {', '.join(map(repr, unknown))}; parts are {', '.join(map(repr, parts))}"
+        )
+    for name, size in sizes.items():
+        if not _is_size(size):
+            raise RunError("check", f"expected()[{name!r}] must be (x, y, z) in mm, got {size!r}; {example}")
+    return sizes
+
+
+def stage_check(module, params, parts, thresholds, sources, result):
+    import check_model
+
+    sizes = expected_sizes(module, params, parts)
+    reports = {}
+    try:
+        for name, shape in parts.items():
+            mesh = check_model.mesh_from_shape(shape)
+            reports[name] = check_model.check_part(mesh, thresholds, None if sizes is None else sizes.get(name))
+    except ImportError as exc:  # e.g. rtree missing because setup.ps1 wasn't re-run after an update
+        missing = exc.name or str(exc)
+        raise RunError(
+            "check",
+            f"Printability checks need the Python package {missing!r}, which is not installed. "
+            "Re-run skills/print3d/scripts/setup.ps1 to update the print3d environment, or use --no-check.",
+            exc=exc,
+        ) from exc
+    result["checks"] = {
+        "status": check_model.worst_status(report["status"] for report in reports.values()),
+        "thresholds": thresholds,
+        "sources": sources,
+        "parts": reports,
+    }
+
+
+def _timed(result, name, fn, *args):
+    start = time.perf_counter()
+    value = fn(*args)
+    result["timings_s"][name] = _r3(time.perf_counter() - start)
+    return value
+
+
+def exit_code(result, strict):
+    if not result["ok"]:
+        return 2 if result["error"]["stage"] == "usage" else 1
+    if strict and result["checks"] is not None and result["checks"]["status"] == "fail":
+        return 3
+    return 0
+
+
+def run(
+    model_path,
+    set_pairs=(),
+    formats=("stl", "3mf"),
+    out_dir=None,
+    profile=None,
+    *,
+    check=True,
+    check_pairs=(),
+    config_checks=None,
+    strict=False,
+    export=True,
+):
+    """Load, parameterise, build, export and check one model. Returns (result, exit_code).
 
     `profile` is a print3d_profile.load_profile() dict; None loads the default base profile.
+    export=False (print3d check) writes nothing to disk. check=False (--no-check) leaves result["checks"] as None.
     """
     model_path = Path(model_path).resolve()
     result = {
@@ -286,6 +452,7 @@ def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None, profile=
         "overrides": {},
         "parts": [],
         "files": {},
+        "checks": None,
         "warnings": [],
         "timings_s": {},
         "profile": None,
@@ -294,53 +461,29 @@ def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None, profile=
     out = Path(out_dir).resolve() if out_dir else model_path.parent / "out"
     stage = "usage"
     try:
-        if not model_path.is_file():
-            raise RunError("usage", f"Model file not found: {model_path.as_posix()}")
-        if model_path.suffix.lower() != ".py":
-            raise RunError("usage", f"Model file must be a .py file: {model_path.as_posix()}")
-        bad = [f for f in formats if f not in ALLOWED_FORMATS]
-        if bad or not formats:
-            raise RunError("usage", f"Unknown format(s) {bad or formats}; choose from {', '.join(ALLOWED_FORMATS)}")
+        check_usage(model_path, formats if export else None)
         raw = parse_overrides(set_pairs)
-
-        if profile is None:
-            try:
-                profile = print3d_profile.load_profile()
-            except print3d_profile.ProfileError as exc:
-                raise RunError("usage", str(exc), exc=exc) from exc
-        print3d_profile.activate(profile)
+        raw_checks = parse_overrides(check_pairs, "--check")
+        profile = activate_profile(profile)
 
         stage = "load"
-        start = time.perf_counter()
-        with contextlib.redirect_stdout(sys.stderr):
-            module = load_model(model_path)
-        result["timings_s"]["load"] = _r3(time.perf_counter() - start)
+        module = _timed(result, "load", stage_load, model_path)
 
         stage = "params"
-        params, overrides = merge_parameters(module.PARAMETERS, raw)
-        result["parameters"], result["overrides"] = params, overrides
+        params = stage_params(module, raw, result)
+        if check:
+            thresholds, sources = resolve_checks(module, config_checks, raw_checks, profile)
 
         stage = "build"
-        start = time.perf_counter()
-        with contextlib.redirect_stdout(sys.stderr):
-            try:
-                built = module.build(dict(params))
-            except (Exception, SystemExit) as exc:
-                raise RunError("build", f"{type(exc).__name__}: {exc}", exc=exc) from exc
-            parts = normalize_parts(built)
-            for name, shape in parts.items():
-                summary = summarize(name, shape)
-                result["parts"].append(summary)
-                if not summary["valid"]:
-                    result["warnings"].append(f"Part {name!r} is not a valid solid according to build123d")
-        result["timings_s"]["build"] = _r3(time.perf_counter() - start)
+        parts = _timed(result, "build", stage_build, module, params, result)
 
-        stage = "export"
-        start = time.perf_counter()
-        out.mkdir(parents=True, exist_ok=True)
-        with contextlib.redirect_stdout(sys.stderr):
-            export_parts(parts, model_path.stem, out, formats, result)
-        result["timings_s"]["export"] = _r3(time.perf_counter() - start)
+        if export:
+            stage = "export"
+            _timed(result, "export", stage_export, parts, model_path.stem, out, formats, result)
+
+        if check:
+            stage = "check"
+            _timed(result, "check", stage_check, module, params, parts, thresholds, sources, result)
         result["ok"] = True
     except RunError as err:
         result["error"] = error_info(err, model_path)
@@ -348,20 +491,10 @@ def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None, profile=
         result["error"] = internal_error(stage, exc)
 
     if stage != "usage" and profile is not None:
-        result["profile"] = {
-            "name": profile["name"],
-            "file": profile["file"],
-            "overrides": dict(profile["overrides"]),
-            "used": print3d_profile.used(),
-        }
+        result["profile"] = profile_record(profile)
 
-    if result["ok"]:
-        code = 0
-    elif result["error"]["stage"] == "usage":
-        code = 2
-    else:
-        code = 1
-    if code != 2:
+    code = exit_code(result, strict)
+    if export and code != 2:
         try:
             out.mkdir(parents=True, exist_ok=True)
             (out / f"{model_path.stem}.result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")

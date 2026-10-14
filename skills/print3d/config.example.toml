@@ -12,3 +12,17 @@ profile = "centauri-carbon-pla-plus"
 # [profile_overrides.centauri-carbon-pla-plus]
 # "holes.compensation" = 0.15
 # "fits.snug" = 0.15
+
+# Printability check thresholds that override the printer profile for every profile and model.
+# Prefer `print3d profile set checks.<key>=...` for printer-specific calibration. Uncomment a line to force it.
+# [checks]
+# bed_x = 256.0              # mm, build volume
+# bed_y = 256.0
+# bed_z = 256.0
+# bed_margin = 5.0           # mm, keep-out at each bed edge
+# min_wall = 0.8             # mm, 2 perimeters with a 0.4 mm nozzle
+# min_feature = 0.4          # mm, 1 nozzle width
+# overhang_angle = 45.0      # degrees past vertical
+# overhang_min_area = 1.0    # mm^2
+# size_tol = 0.1             # mm, allowed difference from expected(p)
+# samples = 3000             # thickness samples per part

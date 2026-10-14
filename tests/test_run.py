@@ -42,7 +42,7 @@ def test_good_model_exports_and_reports(model):
     assert Path(result["files"]["3mf"]).name == "good_box.3mf"
     scene_3mf = trimesh.load(result["files"]["3mf"])
     assert all(g.is_watertight for g in scene_3mf.geometry.values())
-    assert set(result["timings_s"]) == {"load", "build", "export"}
+    assert set(result["timings_s"]) == {"load", "build", "export", "check"}
     saved = json.loads((path.parent / "out" / "good_box.result.json").read_text())
     assert saved == result
 

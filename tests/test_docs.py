@@ -57,3 +57,15 @@ def test_documented_helper_calls_are_importable_from_template():
         for name in ("fit", "hole", "screw_clearance", "insert_hole", "nut_pocket", "profile_value"):
             if re.search(rf"(?<![\w.]){name}\(", text):
                 assert name in imported, f"{name} used in {doc.name} but not imported by the template"
+
+
+def test_docs_cover_printability_checks():
+    skill = read(SKILL / "SKILL.md")
+    for needle in ("print3d check", "--strict", "--no-check", "expected(p)", "checks.status", "CHECKS = {"):
+        assert needle in skill, needle
+    assert "<!-- #3" not in skill  # the placeholder is replaced by the check loop
+    readme = read(REPO / "README.md")
+    for needle in ("print3d check", "--strict", "`3`", "[checks]", "def expected(p)"):
+        assert needle in readme, needle
+    assert "def expected(p):" in read(SKILL / "templates" / "model_template.py")
+    assert "# [checks]" in read(SKILL / "config.example.toml")

@@ -2,6 +2,8 @@
 
     print3d new <part-name> [--dir PARTS_DIR]
     print3d run <model.py> [--set key=value ...] [--formats stl,3mf,step] [--out DIR] [--profile NAME]
+                [--no-check] [--check key=value ...] [--strict]
+    print3d check <model.py> [--set key=value ...] [--check key=value ...] [--strict] [--profile NAME]
     print3d calibrate [--profile NAME] [--out DIR]
     print3d profile show|set KEY=VALUE ...|reset [KEY ...] [--profile NAME]
 """
@@ -180,6 +182,13 @@ def cmd_profile(args):
     return profile_show(load_config(), name), 0
 
 
+def config_checks(config):
+    checks = config.get("checks", {})
+    if not isinstance(checks, dict):
+        raise ValueError(f"[checks] in {config_path()} must be a table of threshold = value")
+    return checks
+
+
 def usage_result(message):
     return {
         "ok": False,
@@ -205,7 +214,8 @@ def cmd_calibrate(args):
     config = load_config()
     profile = resolve_profile(config, args.profile)
     out = args.out or resolve_parts_dir(config) / "calibration" / profile["name"] / "out"
-    result, code = run_model.run(COUPON, (), ["stl", "3mf"], out, profile=profile)
+    # The coupon deliberately has fins below min_wall, so printability checks would always report a failure.
+    result, code = run_model.run(COUPON, (), ["stl", "3mf"], out, profile=profile, check=False)
     result["instructions"] = CALIBRATION_INSTRUCTIONS
     return result, code
 
@@ -222,6 +232,13 @@ def build_parser():
     p_run.add_argument("--formats", default="stl,3mf", help="comma-separated: stl,3mf,step")
     p_run.add_argument("--out", type=Path, help="output folder (default: <model dir>/out)")
     p_run.add_argument("--profile", help="printer profile name (default: config 'profile')")
+    p_run.add_argument("--no-check", dest="check", action="store_false", help="skip the printability checks")
+    _add_check_options(p_run)
+    p_check = sub.add_parser("check", help="build a model and run the printability checks, without exporting")
+    p_check.add_argument("model", type=Path)
+    p_check.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE")
+    p_check.add_argument("--profile", help="printer profile name (default: config 'profile')")
+    _add_check_options(p_check)
     p_cal = sub.add_parser("calibrate", help="build the calibration coupon for the active profile")
     p_cal.add_argument("--profile", help="printer profile name (default: config 'profile')")
     p_cal.add_argument("--out", type=Path, help="output folder (default: <parts_dir>/calibration/<profile>/out)")
@@ -235,6 +252,12 @@ def build_parser():
     for p in (p_show, p_set, p_reset):
         p.add_argument("--profile", help="printer profile name (default: config 'profile')")
     return parser
+
+
+def _add_check_options(parser):
+    parser.add_argument("--check", dest="check_pairs", action="append", default=[], metavar="KEY=VALUE",
+                        help="override a check threshold, e.g. min_wall=1.2")
+    parser.add_argument("--strict", action="store_true", help="exit with code 3 when any check fails")
 
 
 def main(argv=None):
@@ -254,9 +277,21 @@ def main(argv=None):
             parts_dir = args.dir or resolve_parts_dir(load_config())
             result, code = cmd_new(args.name, parts_dir)
         elif args.command == "run":
-            profile = resolve_profile(load_config(), args.profile)
+            if not args.check and (args.strict or args.check_pairs):
+                raise UsageError("--no-check cannot be combined with --check or --strict")
+            config = load_config()
+            profile = resolve_profile(config, args.profile)
             formats = [f.strip().lower() for f in args.formats.split(",") if f.strip()]
-            result, code = run_model.run(args.model, args.overrides, formats, args.out, profile=profile)
+            result, code = run_model.run(
+                args.model, args.overrides, formats, args.out, profile=profile, check=args.check,
+                check_pairs=args.check_pairs, config_checks=config_checks(config), strict=args.strict,
+            )
+        elif args.command == "check":
+            config = load_config()
+            result, code = run_model.run(
+                args.model, args.overrides, profile=resolve_profile(config, args.profile),
+                check_pairs=args.check_pairs, config_checks=config_checks(config), strict=args.strict, export=False,
+            )
         elif args.command == "calibrate":
             result, code = cmd_calibrate(args)
         else:

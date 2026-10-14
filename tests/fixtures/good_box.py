@@ -15,3 +15,7 @@ def build(p):
     with BuildPart() as part:
         Box(p["length"], p["width"], p["height"], align=(Align.CENTER, Align.CENTER, Align.MIN))
     return part.part
+
+
+def expected(p):
+    return {"main": (p["length"], p["width"], p["height"])}
