@@ -42,7 +42,8 @@ def test_results_rounded_to_3_decimals():
         (lambda: screw_clearance("M7"), "M3"),
         (lambda: insert_hole("M8"), "M3"),
         (lambda: nut_pocket("M1"), "M3"),
-        (lambda: profile_value("holes.nope"), "holes.nope"),
+        (lambda: profile_value("holes.nope"), "compensation"),
+        (lambda: profile_value("nope.x"), "printer"),
     ],
 )
 def test_unknown_options_raise_value_error_listing_choices(call, needle):

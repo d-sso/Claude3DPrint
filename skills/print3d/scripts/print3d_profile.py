@@ -143,10 +143,12 @@ def _profile():
 
 def _get(dotted):
     section, key = split_key(dotted)
-    try:
-        value = _profile()["values"][section][key]
-    except KeyError:
-        raise ValueError(f"Unknown profile key {dotted!r}") from None
+    values = _profile()["values"]
+    if section not in values:
+        raise ValueError(f"Unknown profile section {section!r} in {dotted!r}; sections: {', '.join(values)}")
+    if key not in values[section]:
+        raise ValueError(f"Unknown profile key {dotted!r}; keys in [{section}]: {', '.join(values[section])}")
+    value = values[section][key]
     _used[dotted] = value
     return value
 
