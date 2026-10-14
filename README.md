@@ -38,6 +38,25 @@ You can also run the tool yourself:
 Each run writes the model's files to `out/` next to the model, plus `<model>.result.json` with its dimensions,
 volume and any errors.
 
+## Printer profile and calibration
+Tolerances (hole compensation, fits, insert holes, nut pockets) and printer limits come from a **printer profile**:
+one printer + nozzle + material, in `skills/print3d/profiles/`. The default is `centauri-carbon-pla-plus`.
+Models read it through `from print3d_profile import fit, hole, screw_clearance, insert_hole, nut_pocket`.
+
+Calibrate once per profile:
+```bash
+~/.claude/skills/print3d/scripts/print3d calibrate          # builds the coupon + prints measuring instructions
+~/.claude/skills/print3d/scripts/print3d profile set holes.compensation=0.15 fits.snug=0.15
+~/.claude/skills/print3d/scripts/print3d profile show       # merged values and where each comes from
+~/.claude/skills/print3d/scripts/print3d profile reset fits.snug
+```
+Each fit key is set to the label value (diametral clearance in mm) of the coupon socket that gave that fit.
+Calibrated values are stored in your local `config.toml` as quoted dotted keys under `[profile_overrides.<profile>]`
+(for example `"fits.snug" = 0.15`), never in the repo. `print3d profile set` and `reset` refuse sub-table forms
+such as `[profile_overrides.<profile>.fits]`.
+Use `--profile NAME` on `run`, `calibrate` or `profile` to work with another profile for one command.
+For a new material or nozzle, copy the profile file, adjust it and calibrate it on its own.
+
 ## Model files
 ```python
 from build123d import *
