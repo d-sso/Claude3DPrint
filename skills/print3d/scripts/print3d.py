@@ -21,16 +21,24 @@ TEMPLATE = SKILL_DIR / "templates" / "model_template.py"
 COUPON = SKILL_DIR / "calibration" / "calibration_coupon.py"
 CALIBRATION_INSTRUCTIONS = [
     "Print calibration_coupon.3mf (coupon flat on the bed, peg on its end, no supports) with your normal PLA+ settings.",
-    "Raw holes (labelled 3, 4, 5, 8): measure each diameter with calipers. holes.compensation = mean(nominal - measured), "
-    "rounded to 0.05 mm.",
-    "Fit sockets (labelled with clearance 0 ... 0.5): try the peg in each. Tightest one it presses into by hand -> fits.press; "
-    "first one that holds without play -> fits.snug; first one where it rotates and slides freely -> fits.sliding; "
-    "one with obvious play -> fits.loose.",
-    "Thin fins (labelled 0.4 ... 1.2): the thinnest fin that printed cleanly and full height confirms checks.min_feature; "
-    "2x that confirms checks.min_wall. Only change these if the result clearly differs.",
-    "Record the results: print3d profile set holes.compensation=<v> fits.press=<v> fits.snug=<v> fits.sliding=<v> "
-    "fits.loose=<v>",
-    "If holes.compensation changed, reprint the coupon to confirm the fits (the sockets include compensation).",
+    "Raw holes (labels 3, 4, 5, 8) are printed at their exact nominal size, without compensation. Measure each printed "
+    "diameter with calipers. holes.compensation = mean(nominal - measured) over the four holes, rounded to 0.05 mm. "
+    "This is the new absolute value of holes.compensation, not an adjustment to the current one.",
+    "Fit sockets: each socket label is its diametral clearance c in mm, i.e. its label value: 0, 0.05, 0.1, 0.15, 0.2, 0.3, "
+    "0.4, 0.5 (row 1 left to right, then row 2). Try the peg in each socket. Set each fit key to the label value c of the "
+    "chosen socket: "
+    "fits.press = the smallest c the peg can be pushed in by hand (firm force, no tools); "
+    "fits.snug = the smallest c where the peg goes in without force and stays put when the plate is turned upside down; "
+    "fits.sliding = the smallest c where the peg rotates and slides freely with no binding; "
+    "fits.loose = the smallest c with clearly visible side-to-side play.",
+    "If no socket matches a category, keep the current profile value for that key and tell the user the coupon range was "
+    "exceeded.",
+    "If you change holes.compensation, reprint the coupon and re-test the fits before recording them, because the sockets "
+    "include the compensation.",
+    "Thin fins (labels 0.4, 0.6, 0.8, 1.2): checks.min_feature = the thinnest fin that printed complete and full height; "
+    "checks.min_wall = 2 x that value. Only set these if the result differs from the current profile.",
+    "Record the results, for example: print3d profile set holes.compensation=0.15 fits.press=0.05 fits.snug=0.15 "
+    "fits.sliding=0.3 fits.loose=0.4",
 ]
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 

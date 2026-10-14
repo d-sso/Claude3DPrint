@@ -88,4 +88,64 @@ def test_calibrate_command(tmp_path):
     assert 'name="coupon"' in model_xml and 'name="peg"' in model_xml
     assert isinstance(data["instructions"], list) and len(data["instructions"]) >= 4
     assert any("holes.compensation" in line for line in data["instructions"])
+    assert any("label value" in line for line in data["instructions"])
     assert data["profile"]["name"] == "centauri-carbon-pla-plus"
+
+
+def slice_faces(shape, z):
+    """Cross-section faces of `shape` at height z: intersect with a 0.02 mm slab, keep the slab's bottom face."""
+    from build123d import Align, Axis, Box, Location, Plane
+
+    slab = Box(300, 300, 0.02, align=(Align.CENTER, Align.CENTER, Align.CENTER)).moved(Location((0, 0, z)))
+    return (shape & slab).faces().filter_by(Plane.XY).filter_by_position(Axis.Z, z - 0.011, z - 0.009)
+
+
+def void_diameters(face):
+    return sorted(round(w.bounding_box().size.X, 3) for w in face.inner_wires())
+
+
+def void_centres(face):
+    return {(round(w.bounding_box().center().X, 2), round(w.bounding_box().center().Y, 2)) for w in face.inner_wires()}
+
+
+def test_sockets_are_blind_with_one_mm_floor(built):
+    module, parts = built
+    coupon = parts["coupon"]
+    raw = sorted(module.RAW_HOLES)
+    sockets = sorted(round(pp.hole(module.PEG_D + c), 3) for c in module.SOCKET_CLEARANCES)
+    (inside,) = slice_faces(coupon, 3.0)
+    assert void_diameters(inside) == sorted(raw + sockets)
+    (below,) = slice_faces(coupon, 0.95)  # just under the 1 mm floor: raw holes only
+    assert void_diameters(below) == raw
+    (above,) = slice_faces(coupon, 1.05)  # just over the floor: sockets are open
+    assert len(above.inner_wires()) == 12
+
+
+def test_socket_and_hole_positions(built):
+    module, parts = built
+    (inside,) = slice_faces(parts["coupon"], 3.0)
+    expected = {(x, 20.0) for x in module.HOLE_X}
+    expected |= {(module.SOCKET_X[i % 4], module.SOCKET_ROWS_Y[i // 4]) for i in range(8)}
+    assert void_centres(inside) == expected
+
+
+def test_fins_are_thin_rectangles_ten_long(built):
+    module, parts = built
+    fins = slice_faces(parts["coupon"], 10.0)
+    sizes = sorted((round(f.bounding_box().size.X, 2), round(f.bounding_box().size.Y, 2)) for f in fins)
+    assert sizes == [(t, 10.0) for t in module.FIN_THICKNESSES]
+    for f in fins:  # rectangles, not just bounding boxes
+        bb = f.bounding_box()
+        assert abs(f.area - bb.size.X * bb.size.Y) < 0.01
+    assert len(slice_faces(parts["coupon"], 6.0)) == 4
+    assert len(slice_faces(parts["coupon"], 14.9)) == 4
+
+
+def test_labels_are_engraved(built):
+    module, parts = built
+    params = dict(module.PARAMETERS, label_depth=0.001)
+    bare = module.build(params)["coupon"]
+    assert bare.volume - parts["coupon"].volume > 1.0
+    # engraving stays in the top 0.4 mm: the section just below it is unaffected
+    assert len(slice_faces(parts["coupon"], 4.5)) == 1
+    assert slice_faces(parts["coupon"], 4.5)[0].area == pytest.approx(slice_faces(bare, 4.5)[0].area, abs=0.01)
