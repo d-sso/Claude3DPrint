@@ -136,3 +136,25 @@ def test_config_profile_key_selects_profile(cli, tmp_path):
     cli.config.write_text(cli.config.read_text(encoding="utf-8") + 'profile = "nope"\n', encoding="utf-8")
     code, data = cli("profile", "show")
     assert code == 2 and "nope" in data["error"]["message"]
+
+
+SUBTABLE = '\n[profile_overrides.centauri-carbon-pla-plus.fits]\nsnug = 0.15\n'
+
+
+@pytest.mark.parametrize("args", [["set", "fits.loose=0.6"], ["reset", "fits.snug"], ["reset"]])
+def test_subtable_overrides_are_refused_and_file_unchanged(cli, args):
+    cli.config.write_text(cli.config.read_text(encoding="utf-8") + SUBTABLE, encoding="utf-8")
+    before = cli.config.read_bytes()
+    code, data = cli("profile", *args)
+    assert code == 2 and "quoted" in data["error"]["message"]
+    assert "config.toml" in data["error"]["message"]
+    assert cli.config.read_bytes() == before
+    code, data = cli("profile", "show")
+    assert code == 0 and data["values"]["fits.snug"] == {"value": 0.15, "source": "override"}
+
+
+def test_reset_with_no_config_file_creates_nothing(cli):
+    cli.config.unlink()
+    code, data = cli("profile", "reset")
+    assert code == 0 and data["ok"] is True
+    assert not cli.config.exists()

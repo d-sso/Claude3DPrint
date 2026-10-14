@@ -133,7 +133,18 @@ def cmd_profile(args):
         if missing:
             return usage_result(f"No override to reset for: {', '.join(missing)} (profile {name!r})"), 2
         merged = {k: v for k, v in stored.items() if args.keys and k not in args.keys}
+    path = config_path()
+    if path.is_file():
+        prefix = f"[profile_overrides.{name}."
+        if any(line.strip().startswith(prefix) for line in path.read_text(encoding="utf-8").splitlines()):
+            return usage_result(
+                f"{path.as_posix()}: overrides must be quoted keys under [profile_overrides.{name}], "
+                f'e.g. "fits.snug" = 0.15. Sub-tables like [profile_overrides.{name}.fits] cannot be edited by '
+                "`print3d profile`; convert them by hand or remove them."
+            ), 2
     validated = print3d_profile.load_profile(name, merged)["overrides"]  # raises ProfileError before writing
+    if merged == stored:
+        return profile_show(config, name), 0
     config_toml.write_profile_overrides(config_path(), name, validated)
     return profile_show(load_config(), name), 0
 
