@@ -182,10 +182,36 @@ def test_open_mesh_fails_sealed_and_skips_ray_checks():
     mesh.update_faces(np.arange(2, len(mesh.faces)))  # remove one side (two triangles)
     report = check_part(mesh, dict(DEFAULTS))
     found = results(report)
-    assert found["sealed"]["status"] == "fail" and "open edges" in found["sealed"]["message"]
+    assert found["sealed"]["status"] == "fail" and "4 open edges" in found["sealed"]["message"]
+    assert "non-manifold" not in found["sealed"]["message"]
     for name in ("wall", "thin", "overhang"):
         assert found[name]["status"] == "skipped" and "not sealed" in found[name]["message"]
     assert report["status"] == "fail" and report["mesh"]["watertight"] is False
+
+
+def edge_touching_boxes():
+    a = trimesh.creation.box((10, 10, 10))
+    b = trimesh.creation.box((10, 10, 10))
+    b.apply_translation((10, 10, 0))  # shares exactly one vertical edge with a
+    mesh = trimesh.util.concatenate([a, b])
+    mesh.merge_vertices()
+    return mesh
+
+
+def test_bodies_touching_along_an_edge_report_non_manifold_not_open():
+    message = results(check_part(edge_touching_boxes(), dict(DEFAULTS)))["sealed"]["message"]
+    assert "1 non-manifold edge (shared by more than two faces)" in message
+    assert "open edge" not in message
+    assert "touch only along an edge" in message and "close the shape" not in message
+
+
+def test_open_and_non_manifold_edges_are_both_reported():
+    mesh = edge_touching_boxes()
+    far_side = (mesh.face_normals[:, 0] < -0.9) & (mesh.triangles_center[:, 0] < -4)
+    mesh.update_faces(~far_side)  # open the -X side of the first box, away from the shared edge
+    message = results(check_part(mesh, dict(DEFAULTS)))["sealed"]["message"]
+    assert "4 open edges" in message and "1 non-manifold edge" in message
+    assert "close the shape" in message and "touch only along an edge" in message
 
 
 def test_filleted_box_has_no_thin_walls():

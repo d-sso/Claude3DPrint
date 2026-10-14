@@ -128,21 +128,42 @@ def _result(check, status, message, **fields):
     return {"check": check, "status": status, "message": message, **fields}
 
 
+CLOSE_HINT = "close the shape or remove zero-thickness faces"
+SEPARATE_HINT = "separate bodies that touch only along an edge, or fuse them with real overlap"
+
+
+def _plural(n, word):
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
+def _edge_counts(mesh):
+    """(open, non-manifold): unique edges used by exactly one face, and by more than two."""
+    _, counts = np.unique(mesh.edges_sorted, axis=0, return_counts=True)
+    return int((counts == 1).sum()), int((counts > 2).sum())
+
+
 def check_sealed(mesh):
-    problems = []
+    problems, hints = [], []
     if len(mesh.faces) == 0:
         problems.append("mesh has no faces")
+        hints.append(CLOSE_HINT)
     else:
         if not mesh.is_watertight:
-            problems.append("mesh has open edges")
+            open_edges, shared_edges = _edge_counts(mesh)
+            if open_edges or not shared_edges:
+                problems.append(f"mesh has {_plural(open_edges, 'open edge')}" if open_edges else "mesh has open edges")
+                hints.append(CLOSE_HINT)
+            if shared_edges:
+                problems.append(f"mesh has {_plural(shared_edges, 'non-manifold edge')} (shared by more than two faces)")
+                hints.append(SEPARATE_HINT)
         if not mesh.is_winding_consistent:
             problems.append("face winding is inconsistent")
+            hints.append(CLOSE_HINT)
         if mesh.volume <= 0:
             problems.append("volume is not positive (inside out)")
+            hints.append(CLOSE_HINT)
     if problems:
-        return _result(
-            "sealed", "fail", "Not sealed: " + ", ".join(problems) + "; close the shape or remove zero-thickness faces"
-        )
+        return _result("sealed", "fail", "Not sealed: " + ", ".join(problems) + "; " + "; ".join(dict.fromkeys(hints)))
     return _result("sealed", "pass", "Mesh is watertight and consistently wound")
 
 

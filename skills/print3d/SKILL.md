@@ -55,7 +55,7 @@ After each run, read the JSON:
   - `warnings` must be empty. If not, the geometry is invalid; simplify the last change.
 - **Printability checks** (`checks` in the JSON) run on every `run`. Read `checks.status`:
   - `fail` → fix the geometry and re-run. Each failing check has a `message`, and its `regions[].center` is a point on the part (mm) that locates the feature:
-    - `sealed`: the mesh is open or inside out. Close the shape or remove zero-thickness faces. Wall, thin and overhang are skipped until this passes.
+    - `sealed`: the mesh is open, inside out, or non-manifold (two bodies touching only along an edge). Close the shape or remove zero-thickness faces; separate touching bodies or fuse them with real overlap. Wall, thin and overhang are skipped until this passes.
     - `size`: the build doesn't match `expected(p)`. Fix the geometry, or fix `expected()` if the intent changed.
     - `bed_fit`: too big for the bed. Scale down, split into parts, or reorient.
     - `wall` (below the profile's `min_wall`): thicken the wall. `thin` (below `min_feature`): thicken or remove the feature, because it will not print.
