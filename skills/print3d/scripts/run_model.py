@@ -37,14 +37,14 @@ class RunError(Exception):
         self.line = line
 
 
-def parse_overrides(pairs):
+def parse_overrides(pairs, flag="--set"):
     """Turn ["key=value", ...] into {"key": "value"}; values stay raw text."""
     raw = {}
     for item in pairs:
         key, sep, value = item.partition("=")
         key = key.strip()
         if not sep or not key:
-            raise RunError("usage", f"--set expects key=value, got {item!r}")
+            raise RunError("usage", f"{flag} expects key=value, got {item!r}")
         raw[key] = value.strip()
     return raw
 
@@ -126,6 +126,10 @@ def load_model(path):
             )
     if not callable(getattr(module, "build", None)):
         raise RunError("load", "Model must define a function build(p) that returns the part(s)")
+    if not isinstance(getattr(module, "CHECKS", {}), dict):
+        raise RunError("load", "CHECKS must be a dict of check threshold -> value, e.g. {'min_wall': 0.6}")
+    if hasattr(module, "expected") and not callable(module.expected):
+        raise RunError("load", "expected must be a function expected(p) returning {part name: (x, y, z)}")
     return module
 
 
@@ -337,6 +341,67 @@ def stage_export(parts, stem, out, formats, result):
         export_parts(parts, stem, out, formats, result)
 
 
+def resolve_checks(module, config_checks, raw_checks, profile):
+    """Check thresholds: defaults < profile < config [checks] < model CHECKS < --check. Params-stage errors."""
+    import check_model
+
+    try:
+        return check_model.resolve_thresholds(
+            config_checks, getattr(module, "CHECKS", {}), raw_checks, profile=profile
+        )
+    except ValueError as exc:
+        raise RunError("params", str(exc), exc=exc) from exc
+
+
+def _is_size(value):
+    return (
+        isinstance(value, (tuple, list))
+        and len(value) == 3
+        and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in value)
+    )
+
+
+def expected_sizes(module, params, parts):
+    """Call the model's optional expected(p); returns {part name: (x, y, z)} or None when it isn't defined."""
+    if not hasattr(module, "expected"):
+        return None
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            sizes = module.expected(dict(params))
+        except (Exception, SystemExit) as exc:
+            raise RunError("check", f"expected(): {type(exc).__name__}: {exc}", exc=exc) from exc
+    example = 'e.g. return {"main": (p["length"], p["width"], p["height"])}'
+    if not isinstance(sizes, dict):
+        raise RunError(
+            "check", f"expected() must return a dict of part name -> (x, y, z) in mm, got {type(sizes).__name__}; {example}"
+        )
+    unknown = sorted(set(sizes) - set(parts))
+    if unknown:
+        raise RunError(
+            "check", f"expected() names unknown part(s) {', '.join(map(repr, unknown))}; parts are {', '.join(map(repr, parts))}"
+        )
+    for name, size in sizes.items():
+        if not _is_size(size):
+            raise RunError("check", f"expected()[{name!r}] must be (x, y, z) in mm, got {size!r}; {example}")
+    return sizes
+
+
+def stage_check(module, params, parts, thresholds, sources, result):
+    import check_model
+
+    sizes = expected_sizes(module, params, parts)
+    reports = {}
+    for name, shape in parts.items():
+        mesh = check_model.mesh_from_shape(shape)
+        reports[name] = check_model.check_part(mesh, thresholds, None if sizes is None else sizes.get(name))
+    result["checks"] = {
+        "status": check_model.worst_status(report["status"] for report in reports.values()),
+        "thresholds": thresholds,
+        "sources": sources,
+        "parts": reports,
+    }
+
+
 def _timed(result, name, fn, *args):
     start = time.perf_counter()
     value = fn(*args)
@@ -347,13 +412,28 @@ def _timed(result, name, fn, *args):
 def exit_code(result, strict):
     if not result["ok"]:
         return 2 if result["error"]["stage"] == "usage" else 1
+    if strict and result["checks"] is not None and result["checks"]["status"] == "fail":
+        return 3
     return 0
 
 
-def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None, profile=None):
-    """Load, parameterise, build and export one model. Returns (result, exit_code).
+def run(
+    model_path,
+    set_pairs=(),
+    formats=("stl", "3mf"),
+    out_dir=None,
+    profile=None,
+    *,
+    check=True,
+    check_pairs=(),
+    config_checks=None,
+    strict=False,
+    export=True,
+):
+    """Load, parameterise, build, export and check one model. Returns (result, exit_code).
 
     `profile` is a print3d_profile.load_profile() dict; None loads the default base profile.
+    export=False (print3d check) writes nothing to disk. check=False (--no-check) leaves result["checks"] as None.
     """
     model_path = Path(model_path).resolve()
     result = {
@@ -363,6 +443,7 @@ def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None, profile=
         "overrides": {},
         "parts": [],
         "files": {},
+        "checks": None,
         "warnings": [],
         "timings_s": {},
         "profile": None,
@@ -371,8 +452,9 @@ def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None, profile=
     out = Path(out_dir).resolve() if out_dir else model_path.parent / "out"
     stage = "usage"
     try:
-        check_usage(model_path, formats)
+        check_usage(model_path, formats if export else None)
         raw = parse_overrides(set_pairs)
+        raw_checks = parse_overrides(check_pairs, "--check")
         profile = activate_profile(profile)
 
         stage = "load"
@@ -380,12 +462,19 @@ def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None, profile=
 
         stage = "params"
         params = stage_params(module, raw, result)
+        if check:
+            thresholds, sources = resolve_checks(module, config_checks, raw_checks, profile)
 
         stage = "build"
         parts = _timed(result, "build", stage_build, module, params, result)
 
-        stage = "export"
-        _timed(result, "export", stage_export, parts, model_path.stem, out, formats, result)
+        if export:
+            stage = "export"
+            _timed(result, "export", stage_export, parts, model_path.stem, out, formats, result)
+
+        if check:
+            stage = "check"
+            _timed(result, "check", stage_check, module, params, parts, thresholds, sources, result)
         result["ok"] = True
     except RunError as err:
         result["error"] = error_info(err, model_path)
@@ -395,8 +484,8 @@ def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None, profile=
     if stage != "usage" and profile is not None:
         result["profile"] = profile_record(profile)
 
-    code = exit_code(result, strict=False)
-    if code != 2:
+    code = exit_code(result, strict)
+    if export and code != 2:
         try:
             out.mkdir(parents=True, exist_ok=True)
             (out / f"{model_path.stem}.result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
