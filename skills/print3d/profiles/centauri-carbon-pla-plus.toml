@@ -12,7 +12,7 @@ layer_height = 0.2       # informational; the slicer owns the real value
 [holes]
 compensation = 0.2       # vertical holes print undersize; hole(d) = d + compensation
 
-[fits]                   # diametral clearance (hole diameter - shaft diameter) between printed parts
+[fits]                   # diametral clearance (hole diameter - shaft diameter) between printed parts; may be negative
 press = 0.10
 snug = 0.20
 sliding = 0.30
