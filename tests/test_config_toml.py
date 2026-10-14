@@ -98,6 +98,22 @@ TRAILING_COMMENT = (
 )
 
 
+def test_failed_replace_keeps_original_and_leaves_no_temp_file(tmp_path, monkeypatch):
+    import config_toml
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_bytes(ORIGINAL.encode("utf-8"))
+
+    def fail_replace(src, dst):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(config_toml.os, "replace", fail_replace)
+    with pytest.raises(OSError):
+        write_profile_overrides(cfg, "centauri-carbon-pla-plus", {"fits.snug": 0.2})
+    assert read_bytes(cfg) == ORIGINAL
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["config.toml"]
+
+
 def test_replace_keeps_comment_and_blank_before_next_table(tmp_path):
     cfg = tmp_path / "config.toml"
     cfg.write_bytes(TRAILING_COMMENT.encode("utf-8"))

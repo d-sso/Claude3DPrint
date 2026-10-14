@@ -9,6 +9,8 @@ Comment lines between the block's own keys are machine-managed and are dropped o
 """
 from __future__ import annotations
 
+import os
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -65,15 +67,24 @@ def write_profile_overrides(path, profile_name, values):
         lines[insert_at:insert_at] = block
 
     text = "".join(lines)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="") as handle:
-        handle.write(text)
     try:
-        tomllib.loads(text)
+        tomllib.loads(text)  # validate before touching the file, so an invalid result never reaches disk
     except tomllib.TOMLDecodeError as exc:
-        if original is None:
-            path.unlink()
-        else:
-            with open(path, "w", encoding="utf-8", newline="") as handle:
-                handle.write(original)
-        raise ValueError(f"Writing {path.as_posix()} produced invalid TOML ({exc}); the original was restored") from exc
+        raise ValueError(
+            f"Writing {path.as_posix()} would produce invalid TOML ({exc}); config not changed"
+        ) from exc
+
+    # Write to a temp file in the same folder, then swap it in atomically. An interruption leaves either
+    # the old file or the new one, never a truncated file.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
