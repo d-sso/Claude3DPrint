@@ -115,6 +115,12 @@ def test_unknown_check_key_is_params_error(model):
     assert "min_wal" in result["error"]["message"] and "min_wall" in result["error"]["message"]
 
 
+def test_wrong_type_model_check_names_the_layer(tmp_path):
+    result, code = run(_inline(tmp_path, BOX + "CHECKS = {'min_wall': '0.6'}  # test\n"))
+    assert code == 1 and result["error"]["stage"] == "params"
+    assert "'min_wall'" in result["error"]["message"] and "(from the model's CHECKS)" in result["error"]["message"]
+
+
 def test_malformed_check_pair_is_usage_error(model):
     result, code = run(model("good_box.py"), check_pairs=["min_wall"])
     assert code == 2 and "--check expects key=value" in result["error"]["message"]

@@ -38,6 +38,12 @@ PROFILE_KEYS = {
     "min_feature": ("checks", "min_feature"),
     "overhang_angle": ("checks", "overhang_angle"),
 }
+LAYER_LABELS = {  # where each threshold layer comes from, as named in error messages
+    "profile": "the printer profile",
+    "config": "config.toml [checks]",
+    "model": "the model's CHECKS",
+    "cli": "--check",
+}
 
 
 def describe_thresholds():
@@ -82,13 +88,17 @@ def resolve_thresholds(config_checks=None, model_checks=None, cli_checks=None, *
         ("cli", cli_checks or {}, True),
     )
     for source, layer, from_text in layers:
+        label = LAYER_LABELS[source]
         unknown = sorted(set(layer) - set(DEFAULTS))
         if unknown:
             raise ValueError(
-                f"Unknown check threshold(s) in {source}: {', '.join(unknown)}. Valid: {describe_thresholds()}"
+                f"Unknown check threshold(s) in {label}: {', '.join(unknown)}. Valid: {describe_thresholds()}"
             )
         for key, value in layer.items():
-            thresholds[key] = _coerce_threshold(key, value, from_text)
+            try:
+                thresholds[key] = _coerce_threshold(key, value, from_text)
+            except ValueError as exc:
+                raise ValueError(f"{exc} (from {label})") from None
             sources[key] = source
     return thresholds, sources
 

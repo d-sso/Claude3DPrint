@@ -34,8 +34,8 @@ def test_layers_apply_in_order_and_record_sources():
 @pytest.mark.parametrize(
     "layers, needle",
     [
-        (({"bogus": 1}, None, None), "Unknown check threshold(s) in config: bogus. Valid: bed_x"),
-        ((None, {"min_wal": 1}, None), "in model: min_wal"),
+        (({"bogus": 1}, None, None), "Unknown check threshold(s) in config.toml [checks]: bogus. Valid: bed_x"),
+        ((None, {"min_wal": 1}, None), "in the model's CHECKS: min_wal"),
         ((None, None, {"min_wall": "abc"}), "Check threshold 'min_wall': cannot parse 'abc' as float"),
         ((None, {"min_wall": True}, None), "expected float, got bool"),
         (({"min_wall": "1"}, None, None), "expected float, got str"),
@@ -51,6 +51,22 @@ def test_bad_thresholds_raise_clear_errors(layers, needle):
     assert needle in str(err.value)
 
 
+@pytest.mark.parametrize(
+    "layers, label",
+    [
+        (({"min_wall": "1"}, None, None), "(from config.toml [checks])"),
+        ((None, {"min_wall": "1"}, None), "(from the model's CHECKS)"),
+        ((None, None, {"min_wall": "abc"}), "(from --check)"),
+        ((None, None, {"samples": "50"}), "(from --check)"),
+        ((None, {"min_wall": 0}, None), "(from the model's CHECKS)"),
+    ],
+)
+def test_threshold_value_errors_name_their_layer(layers, label):
+    with pytest.raises(ValueError) as err:
+        resolve_thresholds(*layers)
+    assert str(err.value).endswith(label)
+
+
 PROFILE = {
     "name": "test-printer",
     "values": {
@@ -58,6 +74,13 @@ PROFILE = {
         "checks": {"bed_margin": 3.0, "min_wall": 1.0, "min_feature": 0.5, "overhang_angle": 50.0},
     },
 }
+
+
+def test_bad_profile_threshold_names_the_profile():
+    bad = {"name": "bad", "values": {**PROFILE["values"], "checks": {**PROFILE["values"]["checks"], "min_wall": "1.0"}}}
+    with pytest.raises(ValueError) as err:
+        resolve_thresholds(profile=bad)
+    assert "expected float, got str" in str(err.value) and str(err.value).endswith("(from the printer profile)")
 
 
 def test_profile_layer_sits_between_defaults_and_config():
