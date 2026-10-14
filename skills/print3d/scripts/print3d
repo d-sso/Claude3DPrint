@@ -1,0 +1,10 @@
+#!/bin/sh
+# print3d wrapper for Git Bash: runs print3d.py with the print3d venv's Python.
+DIR=$(cd "$(dirname "$0")" && pwd)
+LAD=$(cygpath -u "${LOCALAPPDATA:-$USERPROFILE/AppData/Local}")
+PY="$LAD/print3d/venv/Scripts/python.exe"
+if [ ! -f "$PY" ]; then
+  echo '{"ok": false, "error": {"stage": "usage", "type": "SetupError", "message": "print3d is not installed: run skills/print3d/scripts/setup.ps1 first", "line": null, "traceback": []}}'
+  exit 2
+fi
+exec "$PY" "$DIR/print3d.py" "$@"

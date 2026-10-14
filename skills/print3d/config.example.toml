@@ -1,0 +1,5 @@
+# print3d local configuration. setup.ps1 writes the real file to %LOCALAPPDATA%\print3d\config.toml.
+# It is never stored in the repo. Override its location with the PRINT3D_CONFIG environment variable.
+
+# Folder where `print3d new` creates parts (one subfolder per part). Use forward slashes.
+parts_dir = "~/3DParts"

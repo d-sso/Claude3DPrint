@@ -1,0 +1,24 @@
+"""<Part name>: <one-line purpose>.
+
+Print notes: <orientation on the bed, supports needed, material>.
+"""
+from build123d import *
+
+# Every design decision is a parameter (mm). Override with: print3d run <this file> --set length=60
+PARAMETERS = {
+    "length": 40.0,  # mm, outer size along X
+    "width": 30.0,  # mm, outer size along Y
+    "height": 15.0,  # mm, outer size along Z
+}
+
+
+def build(p):
+    with BuildPart() as part:
+        # Phase 1 - base shape (sits on the bed: Z from 0 up)
+        Box(p["length"], p["width"], p["height"], align=(Align.CENTER, Align.CENTER, Align.MIN))
+
+        # Phase 2 - features (holes, pockets, bosses)
+
+        # Phase 3 - finishing (fillets, chamfers)
+
+    return part.part  # or {"lid": lid.part, "base": base.part} for multi-part designs
