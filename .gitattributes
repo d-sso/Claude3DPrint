@@ -1,0 +1,4 @@
+# Line endings for the wrappers: sh needs LF, cmd.exe needs CRLF
+skills/print3d/scripts/print3d text eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

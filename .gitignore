@@ -1,0 +1,11 @@
+# Generated model outputs
+*.stl
+*.3mf
+*.step
+out/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/

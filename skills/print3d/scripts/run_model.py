@@ -1,0 +1,349 @@
+"""print3d runner: load a parametric build123d model, apply overrides, build, export, report.
+
+build123d is imported lazily (inside functions) so that parameter handling stays fast and testable.
+"""
+from __future__ import annotations
+
+import ast
+import contextlib
+import copy
+import importlib.util
+from importlib.machinery import SourceFileLoader
+import json
+import math
+import os
+import re
+import sys
+import time
+import traceback
+from pathlib import Path
+
+LINEAR_TOL = 0.01  # mm, STL/3MF tessellation tolerance
+ANGULAR_TOL = 0.1  # rad
+ALLOWED_FORMATS = ("stl", "3mf", "step")
+ALLOWED_TYPES = (bool, int, float, str)
+
+
+class RunError(Exception):
+    """A failure at a known stage: usage, load, params, build or export."""
+
+    def __init__(self, stage, message, *, exc=None, line=None):
+        super().__init__(message)
+        self.stage = stage
+        self.message = message
+        self.exc = exc
+        self.line = line
+
+
+def parse_overrides(pairs):
+    """Turn ["key=value", ...] into {"key": "value"}; values stay raw text."""
+    raw = {}
+    for item in pairs:
+        key, sep, value = item.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            raise RunError("usage", f"--set expects key=value, got {item!r}")
+        raw[key] = value.strip()
+    return raw
+
+
+def coerce(text, default):
+    """Convert override text to the type of the parameter's default value."""
+    if isinstance(default, str):
+        try:
+            value = ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            return text
+        return value if isinstance(value, str) else text
+    try:
+        value = ast.literal_eval(text)
+    except (ValueError, SyntaxError):
+        raise ValueError(f"cannot parse {text!r} as {type(default).__name__}") from None
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"value must be finite, got {text!r}")
+    if isinstance(default, bool):
+        if isinstance(value, bool):
+            return value
+    elif isinstance(default, int):
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    elif isinstance(default, float):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    raise ValueError(f"expected {type(default).__name__}, got {type(value).__name__} ({text!r})")
+
+
+def describe_parameters(defaults):
+    return ", ".join(f"{key} ({type(value).__name__}, default {value!r})" for key, value in defaults.items())
+
+
+def merge_parameters(defaults, raw):
+    """Return (params, overrides): defaults merged with type-checked overrides."""
+    unknown = sorted(set(raw) - set(defaults))
+    if unknown:
+        raise RunError(
+            "params",
+            f"Unknown parameter(s): {', '.join(unknown)}. Valid parameters: {describe_parameters(defaults)}",
+        )
+    params = dict(defaults)
+    overrides = {}
+    for key, text in raw.items():
+        try:
+            value = coerce(text, defaults[key])
+        except ValueError as exc:
+            raise RunError("params", f"Parameter '{key}': {exc}", exc=exc) from exc
+        params[key] = value
+        overrides[key] = value
+    return params, overrides
+
+
+PART_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def load_model(path):
+    """Import a model file as a fresh module and validate its contract."""
+    path = Path(path)
+    module_name = "print3d_model_" + re.sub(r"\W", "_", path.stem)
+    spec = importlib.util.spec_from_file_location(module_name, path, loader=SourceFileLoader(module_name, str(path)))
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except SyntaxError as exc:
+        raise RunError("load", f"SyntaxError: {exc.msg}", exc=exc, line=exc.lineno) from exc
+    except (Exception, SystemExit) as exc:
+        raise RunError("load", f"{type(exc).__name__}: {exc}", exc=exc) from exc
+
+    params = getattr(module, "PARAMETERS", None)
+    if not isinstance(params, dict):
+        raise RunError("load", "Model must define PARAMETERS as a dict of name -> default value")
+    for key, value in params.items():
+        if not isinstance(key, str) or not isinstance(value, ALLOWED_TYPES):
+            raise RunError(
+                "load",
+                f"PARAMETERS[{key!r}] must be int, float, bool or str (got {type(value).__name__})",
+            )
+    if not callable(getattr(module, "build", None)):
+        raise RunError("load", "Model must define a function build(p) that returns the part(s)")
+    return module
+
+
+def normalize_parts(built):
+    """Return {name: shape} from whatever build() returned, or raise a build-stage RunError."""
+    from build123d import Compound, Part, Solid
+
+    shape_types = (Part, Solid, Compound)
+    if isinstance(built, shape_types):
+        return {"main": built}
+    if isinstance(built, dict):
+        if not built:
+            raise RunError("build", "build() returned an empty dict; return at least one part")
+        for name, shape in built.items():
+            if not isinstance(name, str) or not PART_NAME_RE.match(name):
+                raise RunError(
+                    "build",
+                    f"Part name {name!r} is invalid; use lowercase letters, digits, '-' or '_' (e.g. 'lid')",
+                )
+            if not isinstance(shape, shape_types):
+                raise RunError("build", f"Part {name!r} is a {type(shape).__name__}, not a build123d Part/Solid/Compound")
+        return dict(built)
+    hint = " (did you mean `return part.part`?)" if type(built).__name__.startswith("Build") else ""
+    raise RunError(
+        "build",
+        f"build() must return a build123d Part, Solid or Compound, or a dict of name -> shape; "
+        f"got {type(built).__name__}{hint}",
+    )
+
+
+def _r3(value):
+    return round(float(value), 3)
+
+
+def summarize(name, shape):
+    """Volume, bounding box and validity for one part."""
+    volume = float(shape.volume)
+    if volume <= 0:
+        raise RunError(
+            "build",
+            f"Part {name!r} has zero or negative volume ({volume:.3f} mm^3); the shape is empty or inside out",
+        )
+    box = shape.bounding_box()
+    valid = shape.is_valid
+    valid = valid() if callable(valid) else valid
+    return {
+        "name": name,
+        "volume_mm3": _r3(volume),
+        "bbox_mm": {
+            "min": [_r3(box.min.X), _r3(box.min.Y), _r3(box.min.Z)],
+            "max": [_r3(box.max.X), _r3(box.max.Y), _r3(box.max.Z)],
+            "size": [_r3(box.size.X), _r3(box.size.Y), _r3(box.size.Z)],
+        },
+        "valid": bool(valid),
+        "files": {},
+    }
+
+
+def _write_stl(shape, path):
+    from build123d import export_stl
+
+    return export_stl(shape, str(path), tolerance=LINEAR_TOL, angular_tolerance=ANGULAR_TOL)
+
+
+def _write_step(shape, path):
+    from build123d import export_step
+
+    return export_step(shape, str(path))
+
+
+def _write_3mf(parts, path):
+    from build123d import Mesher
+
+    mesher = Mesher()
+    for name, shape in parts.items():
+        named = copy.copy(shape)  # shallow copy so the caller's shape keeps its own label
+        named.label = name
+        mesher.add_shape(named, linear_deflection=LINEAR_TOL, angular_deflection=ANGULAR_TOL, part_number=name)
+    mesher.write(str(path))
+    return True
+
+
+def _export_one(writer, payload, path):
+    """Write one file; turn locks, OS errors and silent writer failures into export-stage RunErrors."""
+    locked_hint = "If it is open in a slicer, close it there or use --out to write elsewhere."
+    try:
+        with open(path, "ab"):
+            pass  # on Windows this raises PermissionError when another program holds the file
+        ok = writer(payload, path)
+    except PermissionError as exc:
+        raise RunError("export", f"Cannot write {path.as_posix()}: file is locked or read-only. {locked_hint}", exc=exc) from exc
+    except OSError as exc:
+        raise RunError("export", f"Cannot write {path.as_posix()}: {exc}", exc=exc) from exc
+    if ok is False:
+        raise RunError("export", f"Writer failed for {path.as_posix()}. {locked_hint}")
+    return path.resolve().as_posix()
+
+
+def export_parts(parts, stem, out_dir, formats, result):
+    """Export each part (STL/STEP) and one combined 3MF; record files in result as they are written."""
+    single = len(parts) == 1
+    for entry in result["parts"]:
+        name = entry["name"]
+        base = stem if single else f"{stem}-{name}"
+        for fmt, writer in (("stl", _write_stl), ("step", _write_step)):
+            if fmt in formats:
+                entry["files"][fmt] = _export_one(writer, parts[name], out_dir / f"{base}.{fmt}")
+    if "3mf" in formats:
+        result["files"]["3mf"] = _export_one(_write_3mf, parts, out_dir / f"{stem}.3mf")
+
+
+def _same_file(a, b):
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def _model_frames(exc, model_path):
+    frames = traceback.extract_tb(exc.__traceback__) if exc is not None else []
+    return [f for f in frames if _same_file(f.filename, model_path)]
+
+
+def error_info(err, model_path):
+    """Shorten an expected failure to the model's own frames."""
+    exc = err.exc
+    frames = _model_frames(exc, model_path)
+    line = err.line if err.line is not None else (frames[-1].lineno if frames else None)
+    return {
+        "stage": err.stage,
+        "type": type(exc).__name__ if exc is not None else "RunError",
+        "message": err.message,
+        "line": line,
+        "traceback": [
+            f"{Path(f.filename).name}:{f.lineno} in {f.name}: {(f.line or '').strip()}" for f in frames
+        ][-10:],
+    }
+
+
+def internal_error(stage, exc):
+    """Unexpected failure inside the runner itself: keep the full traceback for debugging."""
+    return {
+        "stage": stage,
+        "type": type(exc).__name__,
+        "message": f"Internal runner error: {exc}",
+        "line": None,
+        "traceback": "".join(traceback.format_exception(exc)).splitlines(),
+    }
+
+
+def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None):
+    """Load, parameterise, build and export one model. Returns (result, exit_code)."""
+    model_path = Path(model_path).resolve()
+    result = {
+        "ok": False,
+        "model": model_path.as_posix(),
+        "parameters": {},
+        "overrides": {},
+        "parts": [],
+        "files": {},
+        "warnings": [],
+        "timings_s": {},
+        "error": None,
+    }
+    out = Path(out_dir).resolve() if out_dir else model_path.parent / "out"
+    stage = "usage"
+    try:
+        if not model_path.is_file():
+            raise RunError("usage", f"Model file not found: {model_path.as_posix()}")
+        if model_path.suffix.lower() != ".py":
+            raise RunError("usage", f"Model file must be a .py file: {model_path.as_posix()}")
+        bad = [f for f in formats if f not in ALLOWED_FORMATS]
+        if bad or not formats:
+            raise RunError("usage", f"Unknown format(s) {bad or formats}; choose from {', '.join(ALLOWED_FORMATS)}")
+        raw = parse_overrides(set_pairs)
+
+        stage = "load"
+        start = time.perf_counter()
+        with contextlib.redirect_stdout(sys.stderr):
+            module = load_model(model_path)
+        result["timings_s"]["load"] = _r3(time.perf_counter() - start)
+
+        stage = "params"
+        params, overrides = merge_parameters(module.PARAMETERS, raw)
+        result["parameters"], result["overrides"] = params, overrides
+
+        stage = "build"
+        start = time.perf_counter()
+        with contextlib.redirect_stdout(sys.stderr):
+            try:
+                built = module.build(dict(params))
+            except (Exception, SystemExit) as exc:
+                raise RunError("build", f"{type(exc).__name__}: {exc}", exc=exc) from exc
+            parts = normalize_parts(built)
+            for name, shape in parts.items():
+                summary = summarize(name, shape)
+                result["parts"].append(summary)
+                if not summary["valid"]:
+                    result["warnings"].append(f"Part {name!r} is not a valid solid according to build123d")
+        result["timings_s"]["build"] = _r3(time.perf_counter() - start)
+
+        stage = "export"
+        start = time.perf_counter()
+        out.mkdir(parents=True, exist_ok=True)
+        with contextlib.redirect_stdout(sys.stderr):
+            export_parts(parts, model_path.stem, out, formats, result)
+        result["timings_s"]["export"] = _r3(time.perf_counter() - start)
+        result["ok"] = True
+    except RunError as err:
+        result["error"] = error_info(err, model_path)
+    except Exception as exc:
+        result["error"] = internal_error(stage, exc)
+
+    if result["ok"]:
+        code = 0
+    elif result["error"]["stage"] == "usage":
+        code = 2
+    else:
+        code = 1
+    if code != 2:
+        try:
+            out.mkdir(parents=True, exist_ok=True)
+            (out / f"{model_path.stem}.result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+        except OSError as exc:
+            result["warnings"].append(f"Could not write result.json: {exc}")
+    return result, code

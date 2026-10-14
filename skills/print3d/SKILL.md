@@ -1,0 +1,62 @@
+---
+name: print3d
+description: Design 3D-printable parts as parametric build123d models and export STL/3MF. Use for 3D printing, STL or 3MF files, brackets, enclosures, holders, adapters, replacement parts, and requests like "model a…" or "print a…".
+---
+
+# print3d: parametric parts for 3D printing
+
+You design parts as **parametric build123d models** (Python) and build them with the `print3d` runner. The runner
+exports printable files and reports results as JSON. Never hand-write STL, and never guess geometry you can measure.
+
+## Running print3d
+- Bash (Git Bash): `~/.claude/skills/print3d/scripts/print3d <command> ...`
+- PowerShell: `& "$HOME\.claude\skills\print3d\scripts\print3d.cmd" <command> ...`
+- If the output says `print3d is not installed`, tell the user to run `skills/print3d/scripts/setup.ps1` from the repo.
+
+Commands:
+- `print3d new <part-name>`: creates `<parts_dir>/<part-name>/<part-name>.py` from the template. Names are kebab-case.
+- `print3d run <model.py> [--set key=value ...] [--formats stl,3mf,step] [--out DIR]`: builds the model and exports to `<model dir>/out/`.
+
+## 1. Gather requirements
+Before modelling, make sure you know the following. Ask **one question at a time**, and only for what isn't already clear:
+- what the part is for and where it goes
+- key dimensions, and the parts it must fit or mate with (measure them: get real numbers in mm)
+- fits: what must slide, press-fit, or take screws (which size?)
+- load and print orientation: what face sits on the bed, and which direction must be strong
+- how many parts, and how they're assembled
+
+State your assumptions back to the user in a short list before building.
+
+## 2. Set up the model
+1. Run `print3d new <part-name>` and edit the file it creates.
+2. Put **every design decision in `PARAMETERS`**, in mm, with a comment. Nothing is hard-coded in `build()`. Derive any values that aren't free choices from parameters inside `build()`.
+3. Fill in the docstring: the part's purpose and print notes (orientation, supports).
+4. `build(p)` returns `part.part`, or `{"name": part.part, ...}` for multi-part designs.
+
+## 3. Build loop
+Model in **phases**, and run after each one, so any error points to the last change:
+1. base shape → 2. features (holes, pockets, bosses) → 3. finishing (fillets, chamfers)
+
+After each run, read the JSON:
+- `ok: false` → look at `error.stage` and `error.line`, fix that line, and re-run.
+  `params` errors list the valid parameters, and `export` errors usually mean the file is open in a slicer.
+- `ok: true` → **check the numbers against your intent**:
+  - `bbox_mm.size`: do all three dimensions match what the part should measure?
+  - `bbox_mm.min[2]` should be `0`, meaning the part sits on the bed.
+  - `volume_mm3`: is it plausible? A hollow part should be well below its bounding-box volume, and holes should reduce volume by about πr²h each.
+  - `warnings` must be empty. If not, the geometry is invalid; simplify the last change.
+- <!-- #3: run printability checks here -->
+- <!-- #4: render and inspect the preview here -->
+
+Repeat until the numbers match. Don't hand over a part whose dimensions you haven't checked.
+
+## 4. build123d API
+Use `references/build123d-cheatsheet.md` for the API and the common pitfalls. Don't rely on remembered build123d
+syntax: the API changes between versions, and the cheat-sheet is tested against the installed version.
+
+## 5. Hand-off
+Tell the user:
+- the output paths (STL per part and the combined 3MF)
+- the final dimensions (from `bbox_mm`) and the key parameters
+- how to change it, with examples: `print3d run <model.py> --set length=80 --set wall=2.4`
+- your print notes: orientation and whether supports are needed
