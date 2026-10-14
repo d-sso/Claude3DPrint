@@ -134,3 +134,85 @@ def test_malformed_config_error_names_the_file(tmp_path):
     data = json.loads(proc.stdout)
     assert proc.returncode == 2
     assert str(bad) in data["error"]["message"]
+
+
+def test_run_reports_checks_and_strict_exit_codes(cli, tmp_path):
+    code, data = cli("run", copy_fixture(tmp_path, "good_box.py"), "--strict")
+    assert code == 0 and data["checks"]["status"] == "pass"
+    code, data = cli("run", copy_fixture(tmp_path, "thin_wall.py"))
+    assert code == 0 and data["checks"]["status"] == "fail"
+    code, data = cli("run", copy_fixture(tmp_path, "thin_wall.py"), "--strict")
+    assert code == 3 and data["ok"] is True
+
+
+def test_run_check_option_overrides_threshold(cli, tmp_path):
+    code, data = cli("run", copy_fixture(tmp_path, "thin_wall.py"), "--strict", "--check", "min_wall=0.45")
+    assert code == 0 and data["checks"]["sources"]["min_wall"] == "cli"
+
+
+def test_run_no_check(cli, tmp_path):
+    code, data = cli("run", copy_fixture(tmp_path, "thin_wall.py"), "--no-check")
+    assert code == 0 and data["checks"] is None
+
+
+@pytest.mark.parametrize("extra", [["--strict"], ["--check", "min_wall=1"]])
+def test_no_check_conflicts_are_usage_errors(cli, tmp_path, extra):
+    code, data = cli("run", copy_fixture(tmp_path, "good_box.py"), "--no-check", *extra)
+    assert code == 2 and "--no-check" in data["error"]["message"]
+
+
+def test_check_command_writes_nothing(cli, tmp_path):
+    model = copy_fixture(tmp_path, "thin_wall.py")
+    code, data = cli("check", model, "--strict")
+    assert code == 3 and data["checks"]["status"] == "fail"
+    assert not (model.parent / "out").exists()
+    code, data = cli("check", model, "--set", "wall=1.0", "--strict")
+    assert code == 0, data
+
+
+def test_check_command_rejects_export_options(cli, tmp_path):
+    code, data = cli("check", copy_fixture(tmp_path, "good_box.py"), "--formats", "stl")
+    assert code == 2
+
+
+def test_config_checks_table_is_used(cli, tmp_path):
+    config = tmp_path / "config.toml"
+    config.write_text(config.read_text(encoding="utf-8") + "\n[checks]\nmin_wall = 0.45\n", encoding="utf-8")
+    code, data = cli("check", copy_fixture(tmp_path, "thin_wall.py"), "--strict")
+    assert code == 0 and data["checks"]["sources"]["min_wall"] == "config"
+
+
+def test_config_checks_not_a_table_is_usage_error(cli, tmp_path):
+    config = tmp_path / "config.toml"
+    config.write_text('checks = 3\n', encoding="utf-8")
+    code, data = cli("run", copy_fixture(tmp_path, "good_box.py"))
+    assert code == 2 and "[checks]" in data["error"]["message"]
+
+
+def test_profile_override_reaches_the_checks(cli, tmp_path):
+    model = copy_fixture(tmp_path, "thin_wall.py")
+    code, data = cli("check", model, "--strict")
+    assert code == 3
+    assert data["checks"]["sources"]["bed_x"] == data["checks"]["sources"]["min_wall"] == "profile"
+    assert data["profile"]["name"] == "centauri-carbon-pla-plus"
+    config = tmp_path / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + '\n[profile_overrides.centauri-carbon-pla-plus]\n"checks.min_wall" = 0.45\n',
+        encoding="utf-8",
+    )
+    code, data = cli("check", model, "--strict")
+    assert code == 0, data
+    assert data["checks"]["thresholds"]["min_wall"] == 0.45 and data["checks"]["sources"]["min_wall"] == "profile"
+
+
+def test_check_command_unknown_profile_is_usage_error(cli, tmp_path):
+    code, data = cli("check", copy_fixture(tmp_path, "good_box.py"), "--profile", "no-such-printer")
+    assert code == 2 and "centauri-carbon-pla-plus" in data["error"]["message"]  # lists the available profiles
+
+
+def test_calibrate_skips_checks(cli):
+    # The coupon deliberately contains fins below min_wall; checking it would always report a failure.
+    code, data = cli("calibrate")
+    assert code == 0, data
+    assert data["checks"] is None
