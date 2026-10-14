@@ -86,3 +86,42 @@ def test_invalid_result_restores_original(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         write_profile_overrides(cfg, "centauri-carbon-pla-plus", {"fits.snug": 0.2})
     assert read_bytes(cfg) == ORIGINAL
+
+
+TRAILING_COMMENT = (
+    "[profile_overrides.a]\r\n"
+    '"fits.snug" = 0.1\r\n'
+    "# note about b\r\n"
+    "\r\n"
+    "[profile_overrides.b]\r\n"
+    '"fits.snug" = 0.4\r\n'
+)
+
+
+def test_replace_keeps_comment_and_blank_before_next_table(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_bytes(TRAILING_COMMENT.encode("utf-8"))
+    write_profile_overrides(cfg, "a", {"fits.snug": 0.2})
+    text = read_bytes(cfg)
+    assert text.endswith("# note about b\r\n\r\n[profile_overrides.b]\r\n\"fits.snug\" = 0.4\r\n")
+    data = tomllib.loads(text)
+    assert data["profile_overrides"]["a"] == {"fits.snug": 0.2}
+    assert data["profile_overrides"]["b"] == {"fits.snug": 0.4}
+
+
+def test_remove_keeps_comment_and_blank_before_next_table(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_bytes(TRAILING_COMMENT.encode("utf-8"))
+    write_profile_overrides(cfg, "a", {})
+    assert read_bytes(cfg) == "# note about b\r\n\r\n[profile_overrides.b]\r\n\"fits.snug\" = 0.4\r\n"
+
+
+def test_replace_before_single_blank_leaves_one_blank_line(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_bytes(
+        b'[profile_overrides.a]\r\n"fits.snug" = 0.1\r\n\r\n[profile_overrides.b]\r\n"fits.snug" = 0.4\r\n'
+    )
+    write_profile_overrides(cfg, "a", {"fits.snug": 0.2})
+    assert read_bytes(cfg) == (
+        '[profile_overrides.a]\r\n"fits.snug" = 0.2\r\n\r\n[profile_overrides.b]\r\n"fits.snug" = 0.4\r\n'
+    )

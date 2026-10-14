@@ -2,6 +2,10 @@
 
 tomllib can only read TOML, and print3d avoids extra dependencies, so this rewrites just one table's lines and
 leaves every other byte of the file untouched (comments, other tables, line endings).
+
+The replaced block runs from its header to its last key/value line. Blank lines and comment-only lines that follow
+that last key, up to the next table header (or end of file), belong to what follows and are kept byte for byte.
+Comment lines between the block's own keys are machine-managed and are dropped on rewrite.
 """
 from __future__ import annotations
 
@@ -40,6 +44,9 @@ def write_profile_overrides(path, profile_name, values):
     start = next((i for i, line in enumerate(lines) if line.strip() == header), None)
     if start is not None:
         end = next((j for j in range(start + 1, len(lines)) if lines[j].lstrip().startswith("[")), len(lines))
+        # Keep the blank and comment-only lines that trail the block; they belong to what follows it.
+        while end > start + 1 and (not lines[end - 1].strip() or lines[end - 1].lstrip().startswith("#")):
+            end -= 1
         del lines[start:end]
         insert_at = start
     else:
@@ -53,8 +60,8 @@ def write_profile_overrides(path, profile_name, values):
 
     if values:
         block = _render_block(profile_name, values, eol)
-        if insert_at < len(lines):
-            block.append(eol)  # keep a blank line before the next table
+        if insert_at < len(lines) and lines[insert_at].strip():
+            block.append(eol)  # keep a blank line before the following content, without doubling one
         lines[insert_at:insert_at] = block
 
     text = "".join(lines)
