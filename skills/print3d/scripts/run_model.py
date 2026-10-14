@@ -5,8 +5,14 @@ build123d is imported lazily (inside functions) so that parameter handling stays
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib.util
+import json
+import os
 import re
+import sys
+import time
+import traceback
 from pathlib import Path
 
 LINEAR_TOL = 0.01  # mm, STL/3MF tessellation tolerance
@@ -169,3 +175,166 @@ def summarize(name, shape):
         "valid": bool(valid),
         "files": {},
     }
+
+
+def _write_stl(shape, path):
+    from build123d import export_stl
+
+    return export_stl(shape, str(path), tolerance=LINEAR_TOL, angular_tolerance=ANGULAR_TOL)
+
+
+def _write_step(shape, path):
+    from build123d import export_step
+
+    return export_step(shape, str(path))
+
+
+def _write_3mf(parts, path):
+    from build123d import Mesher
+
+    mesher = Mesher()
+    for name, shape in parts.items():
+        mesher.add_shape(shape, linear_deflection=LINEAR_TOL, angular_deflection=ANGULAR_TOL, part_number=name)
+    mesher.write(str(path))
+    return True
+
+
+def _export_one(writer, payload, path):
+    """Write one file; turn locks, OS errors and silent writer failures into export-stage RunErrors."""
+    locked_hint = "If it is open in a slicer, close it there or use --out to write elsewhere."
+    try:
+        with open(path, "ab"):
+            pass  # on Windows this raises PermissionError when another program holds the file
+        ok = writer(payload, path)
+    except PermissionError as exc:
+        raise RunError("export", f"Cannot write {path.as_posix()}: file is locked or read-only. {locked_hint}", exc=exc) from exc
+    except OSError as exc:
+        raise RunError("export", f"Cannot write {path.as_posix()}: {exc}", exc=exc) from exc
+    if ok is False:
+        raise RunError("export", f"Writer failed for {path.as_posix()}. {locked_hint}")
+    return path.resolve().as_posix()
+
+
+def export_parts(parts, stem, out_dir, formats, result):
+    """Export each part (STL/STEP) and one combined 3MF; record files in result as they are written."""
+    single = len(parts) == 1
+    for entry in result["parts"]:
+        name = entry["name"]
+        base = stem if single else f"{stem}-{name}"
+        for fmt, writer in (("stl", _write_stl), ("step", _write_step)):
+            if fmt in formats:
+                entry["files"][fmt] = _export_one(writer, parts[name], out_dir / f"{base}.{fmt}")
+    if "3mf" in formats:
+        result["files"]["3mf"] = _export_one(_write_3mf, parts, out_dir / f"{stem}.3mf")
+
+
+def _same_file(a, b):
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def _model_frames(exc, model_path):
+    frames = traceback.extract_tb(exc.__traceback__) if exc is not None else []
+    return [f for f in frames if _same_file(f.filename, model_path)]
+
+
+def error_info(err, model_path):
+    """Shorten an expected failure to the model's own frames."""
+    exc = err.exc
+    frames = _model_frames(exc, model_path)
+    line = err.line if err.line is not None else (frames[-1].lineno if frames else None)
+    return {
+        "stage": err.stage,
+        "type": type(exc).__name__ if exc is not None else "RunError",
+        "message": err.message,
+        "line": line,
+        "traceback": [
+            f"{Path(f.filename).name}:{f.lineno} in {f.name}: {(f.line or '').strip()}" for f in frames
+        ][-10:],
+    }
+
+
+def internal_error(stage, exc):
+    """Unexpected failure inside the runner itself: keep the full traceback for debugging."""
+    return {
+        "stage": stage,
+        "type": type(exc).__name__,
+        "message": f"Internal runner error: {exc}",
+        "line": None,
+        "traceback": "".join(traceback.format_exception(exc)).splitlines(),
+    }
+
+
+def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None):
+    """Load, parameterise, build and export one model. Returns (result, exit_code)."""
+    model_path = Path(model_path).resolve()
+    result = {
+        "ok": False,
+        "model": model_path.as_posix(),
+        "parameters": {},
+        "overrides": {},
+        "parts": [],
+        "files": {},
+        "warnings": [],
+        "timings_s": {},
+        "error": None,
+    }
+    out = Path(out_dir).resolve() if out_dir else model_path.parent / "out"
+    stage = "usage"
+    try:
+        if not model_path.is_file():
+            raise RunError("usage", f"Model file not found: {model_path.as_posix()}")
+        bad = [f for f in formats if f not in ALLOWED_FORMATS]
+        if bad or not formats:
+            raise RunError("usage", f"Unknown format(s) {bad or formats}; choose from {', '.join(ALLOWED_FORMATS)}")
+        raw = parse_overrides(set_pairs)
+
+        stage = "load"
+        start = time.perf_counter()
+        with contextlib.redirect_stdout(sys.stderr):
+            module = load_model(model_path)
+        result["timings_s"]["load"] = _r3(time.perf_counter() - start)
+
+        stage = "params"
+        params, overrides = merge_parameters(module.PARAMETERS, raw)
+        result["parameters"], result["overrides"] = params, overrides
+
+        stage = "build"
+        start = time.perf_counter()
+        with contextlib.redirect_stdout(sys.stderr):
+            try:
+                built = module.build(dict(params))
+            except Exception as exc:
+                raise RunError("build", f"{type(exc).__name__}: {exc}", exc=exc) from exc
+            parts = normalize_parts(built)
+            for name, shape in parts.items():
+                summary = summarize(name, shape)
+                result["parts"].append(summary)
+                if not summary["valid"]:
+                    result["warnings"].append(f"Part {name!r} is not a valid solid according to build123d")
+        result["timings_s"]["build"] = _r3(time.perf_counter() - start)
+
+        stage = "export"
+        start = time.perf_counter()
+        out.mkdir(parents=True, exist_ok=True)
+        with contextlib.redirect_stdout(sys.stderr):
+            export_parts(parts, model_path.stem, out, formats, result)
+        result["timings_s"]["export"] = _r3(time.perf_counter() - start)
+        result["ok"] = True
+    except RunError as err:
+        result["error"] = error_info(err, model_path)
+    except Exception as exc:
+        result["error"] = internal_error(stage, exc)
+
+    if result["ok"]:
+        code = 0
+    elif result["error"]["stage"] == "usage":
+        code = 2
+    else:
+        code = 1
+    if code != 2:
+        try:
+            out.mkdir(parents=True, exist_ok=True)
+            (out / f"{model_path.stem}.result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+        except OSError as exc:
+            result["warnings"].append(f"Could not write result.json: {exc}")
+    return result, code
