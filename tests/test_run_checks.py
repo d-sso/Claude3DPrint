@@ -200,3 +200,17 @@ def test_check_only_mode_records_the_profile(model):
     profile = print3d_profile.load_profile("centauri-carbon-pla-plus", {})
     result, code = run(model("good_box.py"), profile=profile, export=False)
     assert code == 0 and result["profile"]["name"] == "centauri-carbon-pla-plus"
+
+
+def test_missing_check_dependency_says_to_rerun_setup(model, monkeypatch):
+    # A user who pulls this change without re-running setup.ps1 has no rtree in the venv.
+    import sys
+
+    monkeypatch.setitem(sys.modules, "rtree", None)
+    monkeypatch.setitem(sys.modules, "rtree.index", None)
+    result, code = run(model("good_box.py"))
+    assert code == 1
+    error = result["error"]
+    assert error["stage"] == "check" and not error["message"].startswith("Internal")
+    assert "rtree" in error["message"] and "setup.ps1" in error["message"]
+    assert result["parts"][0]["files"]["stl"]  # the export still happened

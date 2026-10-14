@@ -391,9 +391,18 @@ def stage_check(module, params, parts, thresholds, sources, result):
 
     sizes = expected_sizes(module, params, parts)
     reports = {}
-    for name, shape in parts.items():
-        mesh = check_model.mesh_from_shape(shape)
-        reports[name] = check_model.check_part(mesh, thresholds, None if sizes is None else sizes.get(name))
+    try:
+        for name, shape in parts.items():
+            mesh = check_model.mesh_from_shape(shape)
+            reports[name] = check_model.check_part(mesh, thresholds, None if sizes is None else sizes.get(name))
+    except ImportError as exc:  # e.g. rtree missing because setup.ps1 wasn't re-run after an update
+        missing = exc.name or str(exc)
+        raise RunError(
+            "check",
+            f"Printability checks need the Python package {missing!r}, which is not installed. "
+            "Re-run skills/print3d/scripts/setup.ps1 to update the print3d environment, or use --no-check.",
+            exc=exc,
+        ) from exc
     result["checks"] = {
         "status": check_model.worst_status(report["status"] for report in reports.values()),
         "thresholds": thresholds,
