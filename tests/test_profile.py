@@ -94,6 +94,8 @@ def test_missing_key_named(profiles):
         ("compensation = 0.2", "compensation = -0.1", "holes.compensation"),
         ("press = 0.1", "press = true", "fits.press"),
         ("nozzle = 0.4", 'nozzle = "0.4"', "printer.nozzle"),
+        ("press = 0.1", "press = -1.5", "fits.press"),
+        ("loose = 0.5", "loose = 2.5", "fits.loose"),
     ],
 )
 def test_out_of_range_or_wrong_type_rejected(profiles, old, new, needle):
@@ -146,3 +148,25 @@ def test_bad_overrides_rejected(overrides, needle):
 
 def test_split_key_first_dot_only():
     assert pp.split_key("inserts.M2.5") == ("inserts", "M2.5")
+
+
+def test_negative_fits_allowed(profiles):
+    d = profiles(text=BASE.replace("press = 0.1", "press = -0.2").replace("snug = 0.2", "snug = -1.0"))
+    prof = load_profile("test-printer", profiles_dir=d)
+    assert prof["values"]["fits"]["press"] == -0.2 and prof["values"]["fits"]["snug"] == -1.0
+
+
+def test_fit_limits_are_inclusive_and_named():
+    assert load_profile(overrides={"fits.loose": 2.0})["values"]["fits"]["loose"] == 2.0
+    with pytest.raises(ProfileError) as err:
+        load_profile(overrides={"fits.press": "-1.01"})
+    assert "fits.press" in str(err.value) and "between -1 and 2" in str(err.value)
+
+
+def test_negative_fit_through_helpers():
+    pp.activate(load_profile(overrides={"fits.press": -0.2}))
+    try:
+        assert pp.fit("press") == -0.2
+        assert pp.hole(10 + pp.fit("press")) == 10.0  # base compensation 0.2
+    finally:
+        pp.activate(None)

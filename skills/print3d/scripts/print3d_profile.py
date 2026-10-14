@@ -26,6 +26,7 @@ REQUIRED = {
     "nuts": ("af_clearance", "height_clearance"),
     "checks": ("bed_margin", "min_wall", "min_feature", "overhang_angle"),
 }
+FIT_LIMITS = (-1.0, 2.0)  # mm; fits may be negative because printed shafts print undersize
 
 
 class ProfileError(ValueError):
@@ -44,10 +45,6 @@ def split_key(dotted):
     return section, key
 
 
-def _zero_allowed(section, key):
-    return section == "fits" or (section, key) == ("holes", "compensation")
-
-
 def _check_number(dotted, value, where):
     section, key = split_key(dotted)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -55,7 +52,11 @@ def _check_number(dotted, value, where):
     value = float(value)
     if not math.isfinite(value):
         raise ProfileError(f"{where}: {dotted} must be finite, got {value!r}")
-    if _zero_allowed(section, key):
+    if section == "fits":
+        lo, hi = FIT_LIMITS
+        if not lo <= value <= hi:
+            raise ProfileError(f"{where}: {dotted} must be between {lo:g} and {hi:g}, got {value!r}")
+    elif (section, key) == ("holes", "compensation"):
         if value < 0:
             raise ProfileError(f"{where}: {dotted} must be >= 0, got {value!r}")
     elif value <= 0:
@@ -163,7 +164,11 @@ def _r3(value):
 
 
 def fit(kind):
-    """Diametral clearance (hole diameter - shaft diameter) for a printed-to-printed fit: press, snug, sliding, loose."""
+    """Diametral clearance (hole diameter - shaft diameter) for a printed-to-printed fit: press, snug, sliding, loose.
+
+    May be negative: printed shafts print undersize, so the hole is drawn smaller than the nominal shaft.
+    Use it as hole(shaft_d + fit(kind)), and never for metal shafts.
+    """
     _choose("fit", list(_profile()["values"]["fits"]), kind)
     return _r3(_get(f"fits.{kind}"))
 

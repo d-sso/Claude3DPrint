@@ -62,7 +62,7 @@ def test_profile_set_merges_with_existing(cli):
     assert cfg["profile_overrides"]["centauri-carbon-pla-plus"] == {"fits.snug": 0.15, "fits.loose": 0.6}
 
 
-@pytest.mark.parametrize("pair", ["fits.tight=0.1", "fits.snug=abc", "fits.snug=-1", "snug=0.1", "fits.snug"])
+@pytest.mark.parametrize("pair", ["fits.tight=0.1", "fits.snug=abc", "fits.snug=-1.5", "snug=0.1", "fits.snug"])
 def test_invalid_set_writes_nothing(cli, pair):
     before = cli.config.read_bytes()
     code, data = cli("profile", "set", "fits.loose=0.6", pair)
@@ -170,3 +170,13 @@ def test_quoted_name_subtable_is_refused_and_file_unchanged(cli):
     code, data = cli("profile", "reset", "fits.snug")
     assert code == 2 and data["ok"] is False
     assert cli.config.read_bytes() == before
+
+
+def test_profile_set_negative_fit(cli):
+    code, data = cli("profile", "set", "fits.press=-0.2")
+    assert code == 0, data
+    assert data["values"]["fits.press"] == {"value": -0.2, "source": "override"}
+    stored = tomllib.loads(cli.config.read_text(encoding="utf-8"))
+    assert stored["profile_overrides"]["centauri-carbon-pla-plus"]["fits.press"] == -0.2
+    code, data = cli("profile", "show")
+    assert data["values"]["fits.press"]["value"] == -0.2

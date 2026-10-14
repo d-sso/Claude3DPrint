@@ -18,7 +18,7 @@ Commands:
 - `print3d run <model.py> [--set key=value ...] [--formats stl,3mf,step] [--out DIR]`: builds the model and exports to `<model dir>/out/`.
 - `run` also checks printability. Add `--check key=value` to override a threshold, `--strict` to exit with code 3 on a failed check, or `--no-check` to skip the checks.
 - `print3d check <model.py> [--set key=value ...] [--check key=value ...] [--strict]`: builds and checks without writing any files.
-- `print3d calibrate [--profile NAME]`: builds the calibration coupon for the active printer profile and prints measuring instructions.
+- `print3d calibrate [--set gauges=...] [--profile NAME]`: builds the calibration coupon for the active printer profile and prints measuring instructions. `--set gauges=3.175,3.969,5.159` sets the measured gauge (drill-bit shank) diameters.
 - `print3d profile show|set KEY=VALUE ...|reset [KEY ...] [--profile NAME]`: shows the active profile, or records/removes calibrated values. Never hand-edit `config.toml`.
 - `--profile NAME` on `run`/`check`/`calibrate`/`profile` uses another printer profile for that command. A new material or nozzle needs its own profile file and its own calibration.
 
@@ -85,9 +85,11 @@ First run `print3d check <model.py> --strict`; it must exit with code 0. Then te
 
 ## 6. Calibration
 When the user reports coupon measurements, follow the `instructions` returned by `print3d calibrate` to convert them.
-Each fit key is set to the label value of the chosen socket, and `holes.compensation` is an absolute value, not an adjustment.
-Calibration is two-pass: record `holes.compensation` first and, if it moved by 0.05 or more, rerun `print3d calibrate`
-and reprint before recording the fits (check `profile.used["holes.compensation"]` matches).
+Calibration takes one print. Gauges are drill-bit shanks measured with calipers: `print3d calibrate --set gauges=3.175,3.969,5.159`.
+`holes.compensation` comes from the gauge ladders and is an absolute value, not an adjustment.
+Each fit is the chosen socket's label corrected for the new compensation, `fit = c + used - new`, where `used` is
+`profile.used["holes.compensation"]` of the build that was printed (its `out/calibration_coupon.result.json`; read it
+before re-running `print3d calibrate`, which overwrites it). Fits may be negative (printed shafts print undersize).
 If a helper is a `PARAMETERS` default and you override that parameter with `--set`, `profile.used` still lists the helper's value.
 Confirm the values with the user, then record them with `print3d profile set key=value ...` and show the result.
 Overrides are stored as quoted dotted keys under `[profile_overrides.<name>]`; `profile set` refuses sub-table forms.
