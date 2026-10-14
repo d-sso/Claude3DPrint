@@ -165,6 +165,27 @@ def test_lambda_expected_bad_shape_points_at_its_line(tmp_path):
     assert code == 1 and "must return a dict" in result["error"]["message"] and result["error"]["line"] == 7
 
 
+NP_BOX = BOX + "import numpy as np\n"
+
+
+def test_expected_accepts_numpy_sizes_and_result_is_json(tmp_path):
+    source = NP_BOX + "def expected(p):\n    return {'main': (np.int64(40), np.float64(30), np.float32(15))}\n"
+    path = _inline(tmp_path, source)
+    result, code = run(path)
+    assert code == 0, result["error"]
+    assert check_status(result)["size"] == "pass"
+    json.dumps(result)  # numpy values must not leak into the report
+    saved = json.loads((path.parent / "out" / f"{path.stem}.result.json").read_text())
+    assert saved["checks"]["status"] == "pass"
+
+
+@pytest.mark.parametrize("bad", ["'15'", "True", "np.bool_(True)", "float('nan')", "float('inf')", "np.float64('nan')"])
+def test_expected_rejects_non_real_or_non_finite_sizes(tmp_path, bad):
+    result, code = run(_inline(tmp_path, NP_BOX + f"def expected(p):\n    return {{'main': (40, 30, {bad})}}\n"))
+    assert code == 1 and result["error"]["stage"] == "check"
+    assert "must be (x, y, z)" in result["error"]["message"]
+
+
 def test_expected_not_callable_is_load_error(tmp_path):
     result, code = run(_inline(tmp_path, BOX + "expected = (40, 30, 15)\n"))
     assert code == 1 and result["error"]["stage"] == "load" and "expected" in result["error"]["message"]

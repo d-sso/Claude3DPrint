@@ -11,6 +11,7 @@ import importlib.util
 from importlib.machinery import SourceFileLoader
 import json
 import math
+import numbers
 import os
 import re
 import sys
@@ -354,10 +355,11 @@ def resolve_checks(module, config_checks, raw_checks, profile):
 
 
 def _is_size(value):
+    """(x, y, z) of finite real numbers; numpy scalars count, bools (incl. numpy bools, not Real) don't."""
     return (
         isinstance(value, (tuple, list))
         and len(value) == 3
-        and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in value)
+        and all(isinstance(v, numbers.Real) and not isinstance(v, bool) and math.isfinite(v) for v in value)
     )
 
 
@@ -396,7 +398,7 @@ def expected_sizes(module, params, parts):
     for name, size in sizes.items():
         if not _is_size(size):
             raise RunError("check", f"expected()[{name!r}] must be (x, y, z) in mm, got {size!r}; {example}", line=def_line)
-    return sizes
+    return {name: tuple(float(v) for v in size) for name, size in sizes.items()}
 
 
 def stage_check(module, params, parts, thresholds, sources, result):
