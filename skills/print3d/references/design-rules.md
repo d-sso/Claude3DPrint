@@ -17,6 +17,8 @@ the number**, so recalibration updates every part. Everything else is a rule of 
 ## 3. Holes
 - **Vertical holes** (axis along Z) print undersize. Use `hole(d)` for a hole that must print as diameter `d`, and
   `screw_clearance("M3")` for screw clearance holes.
+- Hole compensation is measured with gauge ladders (drill-bit shanks in plain holes) at about 3-5 mm. Other sizes
+  are approximate.
 - **Horizontal holes** print oval and sag at the top. Use a teardrop profile, or print undersize and drill.
 - For precision bores, design `hole(d - 0.1)`, then ream to `d`.
 
@@ -39,7 +41,12 @@ Compensation, so nothing is compensated twice:
 - **Rectangular pockets and slots:** each inner dimension = the mating outer dimension + `fit(kind)`. Fits are diametral
   (total), so that is fit/2 per side. Don't wrap straight-walled pockets in `hole()`: compensation is measured on round
   vertical holes, so treat flat-wall fits as approximate and test-fit the critical ones.
-- The fit values were measured with a ~10 mm vertical round pin, so other sizes and orientations are approximate.
+- The fit values were measured with a ~10 mm vertical round printed pin, so other sizes and orientations are approximate.
+- Fits are measured **between printed parts**, so they include the printed shaft's own error. **Negative fits are
+  normal** when printed shafts come out undersize: `hole(shaft_d + fit(kind))` then draws the hole smaller than the
+  nominal shaft. Don't "fix" a negative fit.
+- **Metal shafts** (dowel pins, drill rod, bearings, screws) don't shrink, so never use `fit()` for them. Use `hole(d)`
+  for a snug or press fit and `hole(d + 0.1)` to `hole(d + 0.2)` for sliding, then test-fit.
 
 Example: a socket for a printed D6 pin that should slide: `hole(6 + fit("sliding"))`. The fit values are measured
 with the coupon sockets that already include the hole compensation, so `hole()` is the right wrapper.

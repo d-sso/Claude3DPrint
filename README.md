@@ -55,14 +55,17 @@ Tolerances (hole compensation, fits, insert holes, nut pockets) and printer limi
 one printer + nozzle + material, in `skills/print3d/profiles/`. The default is `centauri-carbon-pla-plus`.
 Models read it through `from print3d_profile import fit, hole, screw_clearance, insert_hole, nut_pocket, profile_value`.
 
-Calibrate once per profile:
+Calibrate once per profile, with one print:
 ```bash
-~/.claude/skills/print3d/scripts/print3d calibrate          # builds the coupon + prints measuring instructions
-~/.claude/skills/print3d/scripts/print3d profile set holes.compensation=0.15 fits.snug=0.15
+~/.claude/skills/print3d/scripts/print3d calibrate --set gauges=3.175,3.969,5.159   # coupon + measuring instructions
+~/.claude/skills/print3d/scripts/print3d profile set holes.compensation=0.2 fits.press=-0.2 fits.snug=-0.15
 ~/.claude/skills/print3d/scripts/print3d profile show       # merged values and where each comes from
 ~/.claude/skills/print3d/scripts/print3d profile reset fits.snug
 ```
-Each fit key is set to the label value (diametral clearance in mm) of the coupon socket that gave that fit.
+Hole compensation is measured with gauge ladders: plain holes you test with drill-bit shanks (measure each shank with
+calipers and pass the values with `--set gauges=`; the default is 3, 4 and 5 mm). Each fit is the label of the coupon
+socket that gave that fit, corrected for the new compensation. Fits can be negative, because printed shafts come out
+undersize.
 Calibrated values are stored in your local `config.toml` as quoted dotted keys under `[profile_overrides.<profile>]`
 (for example `"fits.snug" = 0.15`), never in the repo. `print3d profile set` and `reset` refuse sub-table forms
 such as `[profile_overrides.<profile>.fits]`.

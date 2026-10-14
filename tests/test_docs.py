@@ -69,3 +69,23 @@ def test_docs_cover_printability_checks():
         assert needle in readme, needle
     assert "def expected(p):" in read(SKILL / "templates" / "model_template.py")
     assert "# [checks]" in read(SKILL / "config.example.toml")
+
+
+def test_design_rules_cover_negative_fits_and_metal_shafts():
+    text = read(SKILL / "references" / "design-rules.md").lower()
+    assert "negative" in text
+    assert "metal shafts" in text
+    assert "gauge ladders" in text
+
+
+def test_skill_md_calibration_is_single_print():
+    text = read(SKILL / "SKILL.md")
+    assert "reprint" not in text.lower() and "two-pass" not in text.lower()
+    assert "fit = c + used - new" in text
+    assert "--set gauges=" in text
+
+
+def test_readme_documents_gauges():
+    text = read(REPO / "README.md")
+    assert "--set gauges=" in text
+    assert "negative" in text.lower()
