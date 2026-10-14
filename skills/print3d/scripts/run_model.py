@@ -363,10 +363,12 @@ def _is_size(value):
     )
 
 
-def _def_line(func):
-    """Line where a model function is defined, for errors that have no model frame; None if unknown."""
+def _def_line(func, model_path):
+    """Line where a model function is defined, for errors that have no model frame; None if unknown or elsewhere."""
     code = getattr(func, "__code__", None)
-    return code.co_firstlineno if code is not None else None
+    if code is None or not _same_file(code.co_filename, model_path):
+        return None
+    return code.co_firstlineno
 
 
 def expected_sizes(module, params, parts):
@@ -374,12 +376,13 @@ def expected_sizes(module, params, parts):
     if not hasattr(module, "expected"):
         return None
     func = module.expected
-    def_line = _def_line(func)
+    model_path = getattr(module, "__file__", "")
+    def_line = _def_line(func, model_path)
     with contextlib.redirect_stdout(sys.stderr):
         try:
             sizes = func(dict(params))
         except (Exception, SystemExit) as exc:
-            in_model = bool(_model_frames(exc, getattr(module, "__file__", "")))
+            in_model = bool(_model_frames(exc, model_path))
             raise RunError(
                 "check", f"expected(): {type(exc).__name__}: {exc}", exc=exc, line=None if in_model else def_line
             ) from exc

@@ -160,6 +160,12 @@ def test_expected_signature_error_points_at_def_line(tmp_path):
     assert "TypeError" in result["error"]["message"] and result["error"]["line"] == 7
 
 
+def test_imported_expected_does_not_report_a_line_from_another_file(tmp_path):
+    # textwrap.dedent raises inside textwrap.py; its line number means nothing in the model file.
+    result, code = run(_inline(tmp_path, BOX + "from textwrap import dedent as expected\n"))
+    assert code == 1 and result["error"]["stage"] == "check" and result["error"]["line"] is None
+
+
 def test_lambda_expected_bad_shape_points_at_its_line(tmp_path):
     result, code = run(_inline(tmp_path, BOX + "expected = lambda p: (40, 30, 15)\n"))
     assert code == 1 and "must return a dict" in result["error"]["message"] and result["error"]["line"] == 7
