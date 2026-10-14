@@ -5,6 +5,9 @@ build123d is imported lazily (inside functions) so that parameter handling stays
 from __future__ import annotations
 
 import ast
+import importlib.util
+import re
+from pathlib import Path
 
 LINEAR_TOL = 0.01  # mm, STL/3MF tessellation tolerance
 ANGULAR_TOL = 0.1  # rad
@@ -81,3 +84,88 @@ def merge_parameters(defaults, raw):
         params[key] = value
         overrides[key] = value
     return params, overrides
+
+
+PART_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def load_model(path):
+    """Import a model file as a fresh module and validate its contract."""
+    path = Path(path)
+    module_name = "print3d_model_" + re.sub(r"\W", "_", path.stem)
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except SyntaxError as exc:
+        raise RunError("load", f"SyntaxError: {exc.msg}", exc=exc, line=exc.lineno) from exc
+    except Exception as exc:
+        raise RunError("load", f"{type(exc).__name__}: {exc}", exc=exc) from exc
+
+    params = getattr(module, "PARAMETERS", None)
+    if not isinstance(params, dict):
+        raise RunError("load", "Model must define PARAMETERS as a dict of name -> default value")
+    for key, value in params.items():
+        if not isinstance(key, str) or not isinstance(value, ALLOWED_TYPES):
+            raise RunError(
+                "load",
+                f"PARAMETERS[{key!r}] must be int, float, bool or str (got {type(value).__name__})",
+            )
+    if not callable(getattr(module, "build", None)):
+        raise RunError("load", "Model must define a function build(p) that returns the part(s)")
+    return module
+
+
+def normalize_parts(built):
+    """Return {name: shape} from whatever build() returned, or raise a build-stage RunError."""
+    from build123d import Compound, Part, Solid
+
+    shape_types = (Part, Solid, Compound)
+    if isinstance(built, shape_types):
+        return {"main": built}
+    if isinstance(built, dict):
+        if not built:
+            raise RunError("build", "build() returned an empty dict; return at least one part")
+        for name, shape in built.items():
+            if not isinstance(name, str) or not PART_NAME_RE.match(name):
+                raise RunError(
+                    "build",
+                    f"Part name {name!r} is invalid; use lowercase letters, digits, '-' or '_' (e.g. 'lid')",
+                )
+            if not isinstance(shape, shape_types):
+                raise RunError("build", f"Part {name!r} is a {type(shape).__name__}, not a build123d Part/Solid/Compound")
+        return dict(built)
+    hint = " (did you mean `return part.part`?)" if type(built).__name__.startswith("Build") else ""
+    raise RunError(
+        "build",
+        f"build() must return a build123d Part, Solid or Compound, or a dict of name -> shape; "
+        f"got {type(built).__name__}{hint}",
+    )
+
+
+def _r3(value):
+    return round(float(value), 3)
+
+
+def summarize(name, shape):
+    """Volume, bounding box and validity for one part."""
+    volume = float(shape.volume)
+    if volume <= 0:
+        raise RunError(
+            "build",
+            f"Part {name!r} has zero or negative volume ({volume:.3f} mm^3); the shape is empty or inside out",
+        )
+    box = shape.bounding_box()
+    valid = shape.is_valid
+    valid = valid() if callable(valid) else valid
+    return {
+        "name": name,
+        "volume_mm3": _r3(volume),
+        "bbox_mm": {
+            "min": [_r3(box.min.X), _r3(box.min.Y), _r3(box.min.Z)],
+            "max": [_r3(box.max.X), _r3(box.max.Y), _r3(box.max.Z)],
+            "size": [_r3(box.size.X), _r3(box.size.Y), _r3(box.size.Z)],
+        },
+        "valid": bool(valid),
+        "files": {},
+    }
