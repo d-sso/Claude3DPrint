@@ -273,6 +273,83 @@ def internal_error(stage, exc):
     }
 
 
+def check_usage(model_path, formats):
+    """Reject a missing or non-.py model, and unknown formats (formats=None when nothing is exported)."""
+    if not model_path.is_file():
+        raise RunError("usage", f"Model file not found: {model_path.as_posix()}")
+    if model_path.suffix.lower() != ".py":
+        raise RunError("usage", f"Model file must be a .py file: {model_path.as_posix()}")
+    if formats is not None:
+        bad = [f for f in formats if f not in ALLOWED_FORMATS]
+        if bad or not formats:
+            raise RunError("usage", f"Unknown format(s) {bad or formats}; choose from {', '.join(ALLOWED_FORMATS)}")
+
+
+def activate_profile(profile):
+    """Activate the given profile, or load and activate the default base profile. Returns the active profile."""
+    if profile is None:
+        try:
+            profile = print3d_profile.load_profile()
+        except print3d_profile.ProfileError as exc:
+            raise RunError("usage", str(exc), exc=exc) from exc
+    print3d_profile.activate(profile)
+    return profile
+
+
+def profile_record(profile):
+    return {
+        "name": profile["name"],
+        "file": profile["file"],
+        "overrides": dict(profile["overrides"]),
+        "used": print3d_profile.used(),
+    }
+
+
+def stage_load(model_path):
+    with contextlib.redirect_stdout(sys.stderr):
+        return load_model(model_path)
+
+
+def stage_params(module, raw, result):
+    params, overrides = merge_parameters(module.PARAMETERS, raw)
+    result["parameters"], result["overrides"] = params, overrides
+    return params
+
+
+def stage_build(module, params, result):
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            built = module.build(dict(params))
+        except (Exception, SystemExit) as exc:
+            raise RunError("build", f"{type(exc).__name__}: {exc}", exc=exc) from exc
+        parts = normalize_parts(built)
+        for name, shape in parts.items():
+            summary = summarize(name, shape)
+            result["parts"].append(summary)
+            if not summary["valid"]:
+                result["warnings"].append(f"Part {name!r} is not a valid solid according to build123d")
+    return parts
+
+
+def stage_export(parts, stem, out, formats, result):
+    out.mkdir(parents=True, exist_ok=True)
+    with contextlib.redirect_stdout(sys.stderr):
+        export_parts(parts, stem, out, formats, result)
+
+
+def _timed(result, name, fn, *args):
+    start = time.perf_counter()
+    value = fn(*args)
+    result["timings_s"][name] = _r3(time.perf_counter() - start)
+    return value
+
+
+def exit_code(result, strict):
+    if not result["ok"]:
+        return 2 if result["error"]["stage"] == "usage" else 1
+    return 0
+
+
 def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None, profile=None):
     """Load, parameterise, build and export one model. Returns (result, exit_code).
 
@@ -294,53 +371,21 @@ def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None, profile=
     out = Path(out_dir).resolve() if out_dir else model_path.parent / "out"
     stage = "usage"
     try:
-        if not model_path.is_file():
-            raise RunError("usage", f"Model file not found: {model_path.as_posix()}")
-        if model_path.suffix.lower() != ".py":
-            raise RunError("usage", f"Model file must be a .py file: {model_path.as_posix()}")
-        bad = [f for f in formats if f not in ALLOWED_FORMATS]
-        if bad or not formats:
-            raise RunError("usage", f"Unknown format(s) {bad or formats}; choose from {', '.join(ALLOWED_FORMATS)}")
+        check_usage(model_path, formats)
         raw = parse_overrides(set_pairs)
-
-        if profile is None:
-            try:
-                profile = print3d_profile.load_profile()
-            except print3d_profile.ProfileError as exc:
-                raise RunError("usage", str(exc), exc=exc) from exc
-        print3d_profile.activate(profile)
+        profile = activate_profile(profile)
 
         stage = "load"
-        start = time.perf_counter()
-        with contextlib.redirect_stdout(sys.stderr):
-            module = load_model(model_path)
-        result["timings_s"]["load"] = _r3(time.perf_counter() - start)
+        module = _timed(result, "load", stage_load, model_path)
 
         stage = "params"
-        params, overrides = merge_parameters(module.PARAMETERS, raw)
-        result["parameters"], result["overrides"] = params, overrides
+        params = stage_params(module, raw, result)
 
         stage = "build"
-        start = time.perf_counter()
-        with contextlib.redirect_stdout(sys.stderr):
-            try:
-                built = module.build(dict(params))
-            except (Exception, SystemExit) as exc:
-                raise RunError("build", f"{type(exc).__name__}: {exc}", exc=exc) from exc
-            parts = normalize_parts(built)
-            for name, shape in parts.items():
-                summary = summarize(name, shape)
-                result["parts"].append(summary)
-                if not summary["valid"]:
-                    result["warnings"].append(f"Part {name!r} is not a valid solid according to build123d")
-        result["timings_s"]["build"] = _r3(time.perf_counter() - start)
+        parts = _timed(result, "build", stage_build, module, params, result)
 
         stage = "export"
-        start = time.perf_counter()
-        out.mkdir(parents=True, exist_ok=True)
-        with contextlib.redirect_stdout(sys.stderr):
-            export_parts(parts, model_path.stem, out, formats, result)
-        result["timings_s"]["export"] = _r3(time.perf_counter() - start)
+        _timed(result, "export", stage_export, parts, model_path.stem, out, formats, result)
         result["ok"] = True
     except RunError as err:
         result["error"] = error_info(err, model_path)
@@ -348,19 +393,9 @@ def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None, profile=
         result["error"] = internal_error(stage, exc)
 
     if stage != "usage" and profile is not None:
-        result["profile"] = {
-            "name": profile["name"],
-            "file": profile["file"],
-            "overrides": dict(profile["overrides"]),
-            "used": print3d_profile.used(),
-        }
+        result["profile"] = profile_record(profile)
 
-    if result["ok"]:
-        code = 0
-    elif result["error"]["stage"] == "usage":
-        code = 2
-    else:
-        code = 1
+    code = exit_code(result, strict=False)
     if code != 2:
         try:
             out.mkdir(parents=True, exist_ok=True)
