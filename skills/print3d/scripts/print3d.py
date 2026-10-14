@@ -45,8 +45,11 @@ def load_config():
     path = config_path()
     if not path.is_file():
         return {}
-    with path.open("rb") as handle:
-        return tomllib.load(handle)
+    try:
+        with path.open("rb") as handle:
+            return tomllib.load(handle)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"Invalid config file {path}: {exc}") from exc
 
 
 def resolve_parts_dir(config):

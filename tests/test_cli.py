@@ -122,3 +122,15 @@ def test_config_path_honours_env(monkeypatch, tmp_path):
 def test_missing_config_file_gives_empty_config(monkeypatch, tmp_path):
     monkeypatch.setenv("PRINT3D_CONFIG", str(tmp_path / "absent.toml"))
     assert print3d.load_config() == {}
+
+
+def test_malformed_config_error_names_the_file(tmp_path):
+    bad = tmp_path / "bad.toml"
+    bad.write_text("parts_dir = = oops\n", encoding="utf-8")
+    env = {**os.environ, "PRINT3D_CONFIG": str(bad)}
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPTS / "print3d.py"), "new", "thing"], capture_output=True, text=True, env=env
+    )
+    data = json.loads(proc.stdout)
+    assert proc.returncode == 2
+    assert str(bad) in data["error"]["message"]

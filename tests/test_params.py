@@ -37,7 +37,7 @@ def test_coerce_accepts(text, default, expected):
 
 @pytest.mark.parametrize(
     "text,default",
-    [("abc", 40.0), ("True", 40.0), ("2.5", 1), ("True", 1), ("1", True), ("[1]", 40.0)],
+    [("abc", 40.0), ("1e999", 40.0), ("-1e999", 40.0), ("1e999", 1), ("True", 40.0), ("2.5", 1), ("True", 1), ("1", True), ("[1]", 40.0)],
 )
 def test_coerce_rejects(text, default):
     with pytest.raises(ValueError):

@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import copy
 import importlib.util
+from importlib.machinery import SourceFileLoader
 import json
+import math
 import os
 import re
 import sys
@@ -56,6 +59,8 @@ def coerce(text, default):
         value = ast.literal_eval(text)
     except (ValueError, SyntaxError):
         raise ValueError(f"cannot parse {text!r} as {type(default).__name__}") from None
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"value must be finite, got {text!r}")
     if isinstance(default, bool):
         if isinstance(value, bool):
             return value
@@ -99,13 +104,13 @@ def load_model(path):
     """Import a model file as a fresh module and validate its contract."""
     path = Path(path)
     module_name = "print3d_model_" + re.sub(r"\W", "_", path.stem)
-    spec = importlib.util.spec_from_file_location(module_name, path)
+    spec = importlib.util.spec_from_file_location(module_name, path, loader=SourceFileLoader(module_name, str(path)))
     module = importlib.util.module_from_spec(spec)
     try:
         spec.loader.exec_module(module)
     except SyntaxError as exc:
         raise RunError("load", f"SyntaxError: {exc.msg}", exc=exc, line=exc.lineno) from exc
-    except Exception as exc:
+    except (Exception, SystemExit) as exc:
         raise RunError("load", f"{type(exc).__name__}: {exc}", exc=exc) from exc
 
     params = getattr(module, "PARAMETERS", None)
@@ -194,7 +199,9 @@ def _write_3mf(parts, path):
 
     mesher = Mesher()
     for name, shape in parts.items():
-        mesher.add_shape(shape, linear_deflection=LINEAR_TOL, angular_deflection=ANGULAR_TOL, part_number=name)
+        named = copy.copy(shape)  # shallow copy so the caller's shape keeps its own label
+        named.label = name
+        mesher.add_shape(named, linear_deflection=LINEAR_TOL, angular_deflection=ANGULAR_TOL, part_number=name)
     mesher.write(str(path))
     return True
 
@@ -283,6 +290,8 @@ def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None):
     try:
         if not model_path.is_file():
             raise RunError("usage", f"Model file not found: {model_path.as_posix()}")
+        if model_path.suffix.lower() != ".py":
+            raise RunError("usage", f"Model file must be a .py file: {model_path.as_posix()}")
         bad = [f for f in formats if f not in ALLOWED_FORMATS]
         if bad or not formats:
             raise RunError("usage", f"Unknown format(s) {bad or formats}; choose from {', '.join(ALLOWED_FORMATS)}")
@@ -303,7 +312,7 @@ def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None):
         with contextlib.redirect_stdout(sys.stderr):
             try:
                 built = module.build(dict(params))
-            except Exception as exc:
+            except (Exception, SystemExit) as exc:
                 raise RunError("build", f"{type(exc).__name__}: {exc}", exc=exc) from exc
             parts = normalize_parts(built)
             for name, shape in parts.items():

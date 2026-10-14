@@ -77,7 +77,8 @@ else {
         $answer = Read-Host "Parts library folder [$default]"
         $PartsDir = if ($answer) { $answer } else { $default }
     }
-    $full = [System.IO.Path]::GetFullPath($PartsDir) -replace '\\', '/'
+    $expanded = $PartsDir -replace '^~(?=[\\/]|$)', $HOME
+    $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($expanded) -replace '\\', '/'
     New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
     [System.IO.File]::WriteAllText($ConfigPath, "parts_dir = `"$full`"`n", (New-Object System.Text.UTF8Encoding $false))
     Step "Wrote $ConfigPath"

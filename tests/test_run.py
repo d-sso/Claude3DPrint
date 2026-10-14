@@ -1,5 +1,7 @@
 import json
+import re
 import shutil
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -38,6 +40,8 @@ def test_good_model_exports_and_reports(model):
     assert mesh.volume == pytest.approx(18000, rel=1e-3)
     assert list(mesh.extents) == pytest.approx([40, 30, 15], abs=1e-3)
     assert Path(result["files"]["3mf"]).name == "good_box.3mf"
+    scene_3mf = trimesh.load(result["files"]["3mf"])
+    assert all(g.is_watertight for g in scene_3mf.geometry.values())
     assert set(result["timings_s"]) == {"load", "build", "export"}
     saved = json.loads((path.parent / "out" / "good_box.result.json").read_text())
     assert saved == result
@@ -51,6 +55,9 @@ def test_multi_part_names_files_and_single_3mf(model):
     assert names == ["multi_part-base.stl", "multi_part-lid.stl"]
     scene = trimesh.load(result["files"]["3mf"])
     assert len(scene.geometry) == 2
+    with zipfile.ZipFile(result["files"]["3mf"]) as archive:
+        xml = archive.read("3D/3dmodel.model").decode("utf-8")
+    assert re.findall(r'<object [^>]*?name="([^"]*)"', xml) == ["base", "lid"]
 
 
 def test_set_override_changes_size(model):
@@ -144,3 +151,35 @@ def test_unexpected_internal_error_keeps_full_traceback(model, monkeypatch):
     assert result["error"]["stage"] == "build"
     assert result["error"]["type"] == "KeyError"
     assert any("run_model.py" in line for line in result["error"]["traceback"])
+
+
+def _inline(tmp_path, source, name="inline.py"):
+    path = tmp_path / name
+    path.write_text(source, encoding="utf-8")
+    return path
+
+
+def test_sys_exit_in_build_is_build_error(tmp_path):
+    path = _inline(tmp_path, "import sys\nPARAMETERS = {}\ndef build(p):\n    sys.exit(3)\n")
+    result, code = run(path)
+    assert code == 1
+    assert result["error"]["stage"] == "build"
+    assert result["error"]["type"] == "SystemExit"
+
+
+def test_sys_exit_at_module_level_is_load_error(tmp_path):
+    path = _inline(tmp_path, "import sys\nsys.exit()\n")
+    result, code = run(path)
+    assert code == 1
+    assert result["error"]["stage"] == "load"
+    assert result["ok"] is False
+
+
+def test_non_py_model_is_usage_error(model, tmp_path):
+    path = tmp_path / "models" / "box.txt"
+    path.parent.mkdir(exist_ok=True)
+    shutil.copyfile(FIXTURES / "good_box.py", path)
+    result, code = run(path)
+    assert code == 2
+    assert result["error"]["stage"] == "usage"
+    assert ".py" in result["error"]["message"]
