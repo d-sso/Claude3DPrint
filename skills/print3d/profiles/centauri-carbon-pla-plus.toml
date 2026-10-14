@@ -1,0 +1,36 @@
+# Base printer profile. Generic starting values; calibrate with `print3d calibrate`.
+# Your calibrated values live in your local config.toml under [profile_overrides.centauri-carbon-pla-plus].
+title = "Elegoo Centauri Carbon / Elegoo PLA+ / 0.4 mm nozzle"
+
+[printer]
+bed_x = 256.0
+bed_y = 256.0
+bed_z = 256.0
+nozzle = 0.4
+layer_height = 0.2       # informational; the slicer owns the real value
+
+[holes]
+compensation = 0.2       # vertical holes print undersize; hole(d) = d + compensation
+
+[fits]                   # diametral clearance (hole diameter - shaft diameter) between printed parts
+press = 0.10
+snug = 0.20
+sliding = 0.30
+loose = 0.50
+
+[inserts]                # heat-set insert pilot hole diameter, used as-is (vendor CAD sizes)
+M2 = 3.2
+"M2.5" = 3.6
+M3 = 4.0
+M4 = 5.6
+M5 = 6.4
+
+[nuts]                   # allowances added to ISO 4032 hex nut dimensions for pockets
+af_clearance = 0.3       # added to across-flats
+height_clearance = 0.2   # added to nut height
+
+[checks]                 # consumed by the printability checks (#3)
+bed_margin = 5.0
+min_wall = 0.8
+min_feature = 0.4
+overhang_angle = 45.0    # degrees from vertical

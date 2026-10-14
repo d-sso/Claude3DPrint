@@ -18,6 +18,8 @@ import time
 import traceback
 from pathlib import Path
 
+import print3d_profile
+
 LINEAR_TOL = 0.01  # mm, STL/3MF tessellation tolerance
 ANGULAR_TOL = 0.1  # rad
 ALLOWED_FORMATS = ("stl", "3mf", "step")
@@ -25,7 +27,7 @@ ALLOWED_TYPES = (bool, int, float, str)
 
 
 class RunError(Exception):
-    """A failure at a known stage: usage, load, params, build or export."""
+    """A failure at a known stage: usage, load, params, build or export (unchanged)."""
 
     def __init__(self, stage, message, *, exc=None, line=None):
         super().__init__(message)
@@ -271,8 +273,11 @@ def internal_error(stage, exc):
     }
 
 
-def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None):
-    """Load, parameterise, build and export one model. Returns (result, exit_code)."""
+def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None, profile=None):
+    """Load, parameterise, build and export one model. Returns (result, exit_code).
+
+    `profile` is a print3d_profile.load_profile() dict; None loads the default base profile.
+    """
     model_path = Path(model_path).resolve()
     result = {
         "ok": False,
@@ -283,6 +288,7 @@ def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None):
         "files": {},
         "warnings": [],
         "timings_s": {},
+        "profile": None,
         "error": None,
     }
     out = Path(out_dir).resolve() if out_dir else model_path.parent / "out"
@@ -296,6 +302,13 @@ def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None):
         if bad or not formats:
             raise RunError("usage", f"Unknown format(s) {bad or formats}; choose from {', '.join(ALLOWED_FORMATS)}")
         raw = parse_overrides(set_pairs)
+
+        if profile is None:
+            try:
+                profile = print3d_profile.load_profile()
+            except print3d_profile.ProfileError as exc:
+                raise RunError("usage", str(exc), exc=exc) from exc
+        print3d_profile.activate(profile)
 
         stage = "load"
         start = time.perf_counter()
@@ -333,6 +346,14 @@ def run(model_path, set_pairs=(), formats=("stl", "3mf"), out_dir=None):
         result["error"] = error_info(err, model_path)
     except Exception as exc:
         result["error"] = internal_error(stage, exc)
+
+    if stage != "usage" and profile is not None:
+        result["profile"] = {
+            "name": profile["name"],
+            "file": profile["file"],
+            "overrides": dict(profile["overrides"]),
+            "used": print3d_profile.used(),
+        }
 
     if result["ok"]:
         code = 0

@@ -16,6 +16,9 @@ exports printable files and reports results as JSON. Never hand-write STL, and n
 Commands:
 - `print3d new <part-name>`: creates `<parts_dir>/<part-name>/<part-name>.py` from the template. Names are kebab-case.
 - `print3d run <model.py> [--set key=value ...] [--formats stl,3mf,step] [--out DIR]`: builds the model and exports to `<model dir>/out/`.
+- `print3d calibrate [--profile NAME]`: builds the calibration coupon for the active printer profile and prints measuring instructions.
+- `print3d profile show|set KEY=VALUE ...|reset [KEY ...] [--profile NAME]`: shows the active profile, or records/removes calibrated values. Never hand-edit `config.toml`.
+- `--profile NAME` on `run`/`calibrate`/`profile` uses another printer profile for that command. A new material or nozzle needs its own profile file and its own calibration.
 
 ## 1. Gather requirements
 Before modelling, make sure you know the following. Ask **one question at a time**, and only for what isn't already clear:
@@ -26,12 +29,14 @@ Before modelling, make sure you know the following. Ask **one question at a time
 - how many parts, and how they're assembled
 
 State your assumptions back to the user in a short list before building.
+If the part mates with hardware or another part, read references/design-rules.md before modelling.
 
 ## 2. Set up the model
 1. Run `print3d new <part-name>` and edit the file it creates.
 2. Put **every design decision in `PARAMETERS`**, in mm, with a comment. Nothing is hard-coded in `build()`. Derive any values that aren't free choices from parameters inside `build()`.
-3. Fill in the docstring: the part's purpose and print notes (orientation, supports).
-4. `build(p)` returns `part.part`, or `{"name": part.part, ...}` for multi-part designs.
+3. Take every printer-dependent number from the profile: `from print3d_profile import fit, hole, screw_clearance, insert_hole, nut_pocket, profile_value`. Never hard-code a clearance, hole compensation, insert hole or nut pocket. Helpers may be used as PARAMETERS defaults, so they stay `--set`-able.
+4. Fill in the docstring: the part's purpose and print notes (orientation, supports).
+5. `build(p)` returns `part.part`, or `{"name": part.part, ...}` for multi-part designs.
 
 ## 3. Build loop
 Model in **phases**, and run after each one, so any error points to the last change:
@@ -60,3 +65,14 @@ Tell the user:
 - the final dimensions (from `bbox_mm`) and the key parameters
 - how to change it, with examples: `print3d run <model.py> --set length=80 --set wall=2.4`
 - your print notes: orientation and whether supports are needed
+- the active printer profile (`profile.name` in the result) and any tolerance worth test-fitting first
+- if `print3d profile show` reports no "override" sources, suggest `print3d calibrate` before relying on tight fits
+
+## 6. Calibration
+When the user reports coupon measurements, follow the `instructions` returned by `print3d calibrate` to convert them.
+Each fit key is set to the label value of the chosen socket, and `holes.compensation` is an absolute value, not an adjustment.
+Calibration is two-pass: record `holes.compensation` first and, if it moved by 0.05 or more, rerun `print3d calibrate`
+and reprint before recording the fits (check `profile.used["holes.compensation"]` matches).
+If a helper is a `PARAMETERS` default and you override that parameter with `--set`, `profile.used` still lists the helper's value.
+Confirm the values with the user, then record them with `print3d profile set key=value ...` and show the result.
+Overrides are stored as quoted dotted keys under `[profile_overrides.<name>]`; `profile set` refuses sub-table forms.

@@ -3,3 +3,12 @@
 
 # Folder where `print3d new` creates parts (one subfolder per part). Use forward slashes.
 parts_dir = "~/3DParts"
+
+# Active printer profile (a file in skills/print3d/profiles/). Override per command with --profile NAME.
+profile = "centauri-carbon-pla-plus"
+
+# Calibrated values for a profile are written here by `print3d profile set` (do not edit by hand).
+# They must be quoted dotted keys under the profile's table, not sub-tables like [profile_overrides.<name>.fits]:
+# [profile_overrides.centauri-carbon-pla-plus]
+# "holes.compensation" = 0.15
+# "fits.snug" = 0.15
