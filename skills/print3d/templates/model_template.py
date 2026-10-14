@@ -23,3 +23,12 @@ def build(p):
         # Phase 3 - finishing (fillets, chamfers)
 
     return part.part  # or {"lid": lid.part, "base": base.part} for multi-part designs
+
+
+def expected(p):
+    # Outer size per part (mm), from the parameters. print3d checks the built part against it.
+    return {"main": (p["length"], p["width"], p["height"])}
+
+
+# Lower a check threshold only for a deliberate feature, and say why, e.g.:
+# CHECKS = {"min_wall": 0.6}  # living hinge is meant to flex

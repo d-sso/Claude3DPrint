@@ -25,6 +25,8 @@ powershell -ExecutionPolicy Bypass -File skills\print3d\scripts\setup.ps1
 
 Parameters: `-PartsDir <folder>` skips the prompt; `-SkipSelfTest` skips step 5.
 
+Re-run `setup.ps1` after pulling a change to `skills/print3d/requirements.txt`.
+
 ## Use
 In Claude Code, describe the part: *"model a wall bracket for a 25 mm pipe, two M4 screws"*.
 Claude asks what it needs to know, creates `<parts library>/<part-name>/<part-name>.py`, builds it, and reports
@@ -36,7 +38,17 @@ You can also run the tool yourself:
 ~/.claude/skills/print3d/scripts/print3d run ~/3DParts/cable-clip/cable-clip.py --set length=60 --formats stl,3mf,step
 ```
 Each run writes the model's files to `out/` next to the model, plus `<model>.result.json` with its dimensions,
-volume and any errors.
+volume, any errors, and the printability checks: sealed mesh, expected size, bed fit, wall thickness, thin
+features and overhangs. To check without exporting:
+```bash
+~/.claude/skills/print3d/scripts/print3d check ~/3DParts/cable-clip/cable-clip.py --strict
+```
+The bed size and the wall, feature and overhang limits come from the active printer profile (`print3d profile show`).
+Record calibrated values there, for example with `print3d profile set checks.min_wall=1.0`. To override the
+profile, use `[checks]` in `config.toml` (for every profile; see `config.example.toml`), a model's `CHECKS` dict,
+or `--check key=value` for one run. `--no-check` skips the checks.
+
+Exit codes: `0` ok, `1` model error, `2` usage error, `3` a check failed under `--strict`.
 
 ## Printer profile and calibration
 Tolerances (hole compensation, fits, insert holes, nut pockets) and printer limits come from a **printer profile**:
@@ -67,6 +79,9 @@ def build(p):
     with BuildPart() as part:
         Box(p["length"], p["width"], p["height"], align=(Align.CENTER, Align.CENTER, Align.MIN))
     return part.part  # or {"lid": ..., "base": ...} for several parts
+
+def expected(p):  # optional: outer size per part, checked after each build
+    return {"main": (p["length"], p["width"], p["height"])}
 ```
 
 ## Uninstall
