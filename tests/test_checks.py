@@ -152,3 +152,129 @@ def test_worst_status_ignores_skipped():
     assert worst_status(["warn", "fail", "pass"]) == "fail"
     assert worst_status(["skipped"]) == "pass"
     assert worst_status([]) == "pass"
+
+
+def test_open_mesh_fails_sealed_and_skips_ray_checks():
+    mesh = trimesh.creation.box((40, 30, 15))
+    mesh.update_faces(np.arange(2, len(mesh.faces)))  # remove one side (two triangles)
+    report = check_part(mesh, dict(DEFAULTS))
+    found = results(report)
+    assert found["sealed"]["status"] == "fail" and "open edges" in found["sealed"]["message"]
+    for name in ("wall", "thin", "overhang"):
+        assert found[name]["status"] == "skipped" and "not sealed" in found[name]["message"]
+    assert report["status"] == "fail" and report["mesh"]["watertight"] is False
+
+
+def test_filleted_box_has_no_thin_walls():
+    with BuildPart() as part:
+        Box(40, 30, 15, align=BED)
+        fillet(part.edges(), 2)
+    assert results(run_checks(part.part))["wall"]["status"] == "pass"
+
+
+# --- wall and thin ------------------------------------------------------------------------------
+
+def test_thin_wall_fails_wall_but_not_thin():
+    with BuildPart() as part:
+        Box(40, 30, 15, align=BED)
+        offset(amount=-0.5, openings=part.faces().sort_by(Axis.Z)[-1])
+    mesh = mesh_from_shape(part.part)
+    found = results(check_part(mesh, dict(DEFAULTS)))
+    wall = found["wall"]
+    assert wall["status"] == "fail" and wall["measured"] == pytest.approx(0.5, abs=1e-3) and wall["limit"] == 0.8
+    assert 1 <= len(wall["regions"]) <= check_model.MAX_REGIONS
+    worst = wall["regions"][0]
+    assert worst["value"] == pytest.approx(0.5, abs=1e-3)
+    _, distance, _ = mesh.nearest.on_surface([worst["center"]])
+    assert distance[0] < 1e-3  # the region is reported at a real point on the part
+    assert found["thin"]["status"] == "pass"
+
+
+def test_thin_fin_fails_thin():
+    with BuildPart() as part:
+        Box(20, 20, 5, align=BED)
+        with Locations((0, 0, 5)):
+            Box(0.3, 20, 10, align=BED)
+    found = results(run_checks(part.part))
+    assert found["thin"]["status"] == "fail" and found["thin"]["measured"] == pytest.approx(0.3, abs=1e-3)
+    assert found["wall"]["status"] == "fail"
+    (region,) = found["thin"]["regions"]
+    assert abs(region["center"][0]) <= 0.15 + 1e-3 and region["center"][2] >= 5 - 1e-3
+
+
+def test_small_thin_tab_on_large_plate_is_found():
+    # A 0.3 mm tab is ~0.02 % of the surface; area-weighted sampling alone would usually miss it.
+    with BuildPart() as part:
+        Box(200, 200, 5, align=BED)
+        with Locations((90, 90, 5)):
+            Box(0.3, 3, 3, align=BED)
+    found = results(run_checks(part.part))
+    assert found["thin"]["status"] == "fail"
+    assert found["thin"]["regions"][0]["center"][0] == pytest.approx(90, abs=0.2)
+
+
+def test_min_wall_threshold_override_passes_the_wall():
+    with BuildPart() as part:
+        Box(40, 30, 15, align=BED)
+        offset(amount=-0.5, openings=part.faces().sort_by(Axis.Z)[-1])
+    assert results(run_checks(part.part, min_wall=0.45))["wall"]["status"] == "pass"
+
+
+# --- overhang -----------------------------------------------------------------------------------
+
+def test_plain_box_has_no_overhang_because_bed_faces_are_excluded():
+    found = results(run_checks(box()))["overhang"]
+    assert found["status"] == "pass" and found["measured"] == 0.0
+
+
+def test_floating_part_bottom_is_not_an_overhang():
+    with BuildPart() as part:
+        with Locations((0, 0, 10)):
+            Box(40, 30, 3, align=BED)
+    assert results(run_checks(part.part))["overhang"]["status"] == "pass"
+
+
+def test_tee_underside_warns_with_two_regions():
+    with BuildPart() as part:
+        Box(10, 10, 10, align=BED)
+        with Locations((0, 0, 10)):
+            Box(40, 10, 5, align=BED)
+    report = run_checks(part.part)
+    found = results(report)["overhang"]
+    assert found["status"] == "warn" and found["measured"] == pytest.approx(300, rel=1e-6)
+    assert len(found["regions"]) == 2
+    for region in found["regions"]:
+        assert region["area_mm2"] == pytest.approx(150, rel=1e-6)
+        assert region["max_angle_deg"] == pytest.approx(90)
+        assert region["center"][2] == pytest.approx(10)
+    assert report["status"] == "warn"
+
+
+def test_overhang_angle_and_min_area_thresholds():
+    with BuildPart() as part:
+        Box(10, 10, 10, align=BED)
+        with Locations((0, 0, 10)):
+            Box(40, 10, 5, align=BED)
+    assert results(run_checks(part.part, overhang_min_area=200))["overhang"]["status"] == "pass"
+    with BuildPart() as drilled:
+        Box(40, 30, 15, align=BED)
+        with Locations((0, 0, 7.5)):
+            Cylinder(4, 40, rotation=(90, 0, 0), mode=Mode.SUBTRACT)
+    hole = results(run_checks(drilled.part))["overhang"]
+    assert hole["status"] == "warn"  # the top of a horizontal hole prints as a bridge
+    assert hole["regions"][0]["center"][2] > 7.5
+    assert results(run_checks(drilled.part, overhang_min_area=1000))["overhang"]["status"] == "pass"
+
+
+def test_check_order_and_mesh_info():
+    report = run_checks(box(), (40, 30, 15))
+    assert [r["check"] for r in report["results"]] == ["sealed", "size", "bed_fit", "wall", "thin", "overhang"]
+    assert report["status"] == "pass"
+    assert report["mesh"] == {"triangles": 12, "watertight": True}
+
+
+def test_checks_are_repeatable():
+    with BuildPart() as part:
+        Box(40, 30, 15, align=BED)
+        offset(amount=-0.5, openings=part.faces().sort_by(Axis.Z)[-1])
+    assert run_checks(part.part) == run_checks(part.part)
