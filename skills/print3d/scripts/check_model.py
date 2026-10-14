@@ -91,3 +91,93 @@ def resolve_thresholds(config_checks=None, model_checks=None, cli_checks=None, *
             thresholds[key] = _coerce_threshold(key, value, from_text)
             sources[key] = source
     return thresholds, sources
+
+
+def mesh_from_shape(shape):
+    """Tessellate a build123d shape like the exporters do, minus the zero-area slivers left at fillet corners."""
+    vertices, triangles = shape.tessellate(LINEAR_TOL, ANGULAR_TOL)
+    mesh = trimesh.Trimesh(
+        vertices=np.array([(v.X, v.Y, v.Z) for v in vertices], dtype=float).reshape(-1, 3),
+        faces=np.array(triangles, dtype=np.int64).reshape(-1, 3),
+        process=True,
+    )
+    mesh.update_faces(mesh.nondegenerate_faces())
+    mesh.remove_unreferenced_vertices()
+    return mesh
+
+
+def _r3(value):
+    return round(float(value), 3)
+
+
+def _vec(values):
+    return [_r3(v) for v in values]
+
+
+def _result(check, status, message, **fields):
+    return {"check": check, "status": status, "message": message, **fields}
+
+
+def check_sealed(mesh):
+    problems = []
+    if len(mesh.faces) == 0:
+        problems.append("mesh has no faces")
+    else:
+        if not mesh.is_watertight:
+            problems.append("mesh has open edges")
+        if not mesh.is_winding_consistent:
+            problems.append("face winding is inconsistent")
+        if mesh.volume <= 0:
+            problems.append("volume is not positive (inside out)")
+    if problems:
+        return _result(
+            "sealed", "fail", "Not sealed: " + ", ".join(problems) + "; close the shape or remove zero-thickness faces"
+        )
+    return _result("sealed", "pass", "Mesh is watertight and consistently wound")
+
+
+def check_size(mesh, expected_size, tol):
+    if expected_size is None:
+        return _result("size", "skipped", "No expected size for this part; add expected(p) to the model")
+    measured = mesh.extents
+    expected = np.array(expected_size, dtype=float)
+    off = np.abs(measured - expected) > tol
+    fields = {"measured": _vec(measured), "expected": _vec(expected), "limit": _r3(tol)}
+    if off.any():
+        axes = ", ".join(f"{axis} {measured[i]:.3f} vs {expected[i]:.3f}" for i, axis in enumerate("XYZ") if off[i])
+        return _result("size", "fail", f"Size differs from expected by more than {tol} mm: {axes}", **fields)
+    return _result("size", "pass", f"Size matches expected within {tol} mm", **fields)
+
+
+def check_bed_fit(mesh, t):
+    limit = np.array([t["bed_x"] - 2 * t["bed_margin"], t["bed_y"] - 2 * t["bed_margin"], t["bed_z"]])
+    measured = mesh.extents
+    over = measured > limit
+    fields = {"measured": _vec(measured), "limit": _vec(limit)}
+    if over.any():
+        axes = ", ".join(f"{axis} {measured[i]:.1f} > {limit[i]:.1f}" for i, axis in enumerate("XYZ") if over[i])
+        return _result("bed_fit", "fail", f"Too big for the bed: {axes} mm; scale down, split or reorient", **fields)
+    return _result("bed_fit", "pass", "Fits the bed", **fields)
+
+
+def worst_status(statuses):
+    worst = max(statuses, key=STATUS_ORDER.__getitem__, default="pass")
+    return "pass" if worst == "skipped" else worst
+
+
+def check_part(mesh, thresholds, expected_size=None):
+    """Run every check on one part's mesh. Returns {"status", "mesh", "results"}."""
+    t = thresholds
+    sealed = check_sealed(mesh)
+    if len(mesh.faces) == 0:
+        return {
+            "status": "fail",
+            "mesh": {"triangles": 0, "watertight": False},
+            "results": [sealed] + [_result(name, "skipped", "mesh is empty") for name in CHECK_NAMES[1:]],
+        }
+    results = [sealed, check_size(mesh, expected_size, t["size_tol"]), check_bed_fit(mesh, t)]
+    return {
+        "status": worst_status(r["status"] for r in results),
+        "mesh": {"triangles": int(len(mesh.faces)), "watertight": bool(mesh.is_watertight)},
+        "results": results,
+    }

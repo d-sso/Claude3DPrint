@@ -5,7 +5,7 @@ import trimesh
 from build123d import Align, Axis, Box, BuildPart, Cylinder, Locations, Mode, fillet, offset
 
 import check_model
-from check_model import DEFAULTS, resolve_thresholds
+from check_model import DEFAULTS, check_part, mesh_from_shape, resolve_thresholds, worst_status
 
 BED = (Align.CENTER, Align.CENTER, Align.MIN)
 
@@ -74,3 +74,81 @@ def test_profile_supplies_only_printer_thresholds():
         "bed_x", "bed_y", "bed_z", "bed_margin", "min_wall", "min_feature", "overhang_angle"
     }
     assert check_model.profile_checks(None) == {}
+
+
+def box(x=40, y=30, z=15):
+    with BuildPart() as part:
+        Box(x, y, z, align=BED)
+    return part.part
+
+
+def results(report):
+    return {r["check"]: r for r in report["results"]}
+
+
+def run_checks(shape, expected=None, **overrides):
+    thresholds, _ = resolve_thresholds(cli_checks={k: str(v) for k, v in overrides.items()})
+    return check_part(mesh_from_shape(shape), thresholds, expected)
+
+
+# --- mesh conversion and sealed -----------------------------------------------------------------
+
+def test_mesh_from_box_is_sealed():
+    mesh = mesh_from_shape(box())
+    assert mesh.is_watertight and mesh.volume == pytest.approx(18000, rel=1e-6)
+
+
+def test_fillets_do_not_cause_a_false_sealed_failure():
+    # build123d leaves zero-area slivers at fillet corners; they must not read as open edges.
+    with BuildPart() as part:
+        Box(40, 30, 15, align=BED)
+        fillet(part.edges(), 2)
+    assert results(run_checks(part.part))["sealed"]["status"] == "pass"
+
+
+def test_inside_out_mesh_fails_sealed():
+    mesh = trimesh.creation.box((10, 10, 10))
+    mesh.invert()
+    assert results(check_part(mesh, dict(DEFAULTS)))["sealed"]["status"] == "fail"
+
+
+def test_empty_mesh_fails_sealed_without_crashing():
+    mesh = trimesh.Trimesh(vertices=np.zeros((0, 3)), faces=np.zeros((0, 3), dtype=np.int64))
+    report = check_part(mesh, dict(DEFAULTS))
+    found = results(report)
+    assert found["sealed"]["status"] == "fail" and "no faces" in found["sealed"]["message"]
+    assert [r["status"] for r in report["results"][1:]] == ["skipped"] * 5 and report["status"] == "fail"
+
+
+# --- size and bed_fit ---------------------------------------------------------------------------
+
+def test_size_pass_fail_and_skip():
+    assert results(run_checks(box(), (40, 30, 15)))["size"]["status"] == "pass"
+    wrong = results(run_checks(box(), (40, 30, 20)))["size"]
+    assert wrong["status"] == "fail" and "Z 15.000 vs 20.000" in wrong["message"]
+    assert wrong["measured"] == [40.0, 30.0, 15.0] and wrong["expected"] == [40.0, 30.0, 20.0]
+    skipped = results(run_checks(box()))["size"]
+    assert skipped["status"] == "skipped" and "expected(p)" in skipped["message"]
+
+
+def test_size_tolerance_is_applied():
+    assert results(run_checks(box(), (40.05, 30, 15)))["size"]["status"] == "pass"
+    assert results(run_checks(box(), (40.05, 30, 15), size_tol=0.01))["size"]["status"] == "fail"
+
+
+def test_bed_fit_uses_margin_and_height():
+    found = results(run_checks(box(300, 10, 10)))["bed_fit"]
+    assert found["status"] == "fail" and "X 300.0 > 246.0" in found["message"]
+    assert found["limit"] == [246.0, 246.0, 256.0]
+    assert results(run_checks(box(246, 246, 256)))["bed_fit"]["status"] == "pass"
+    assert results(run_checks(box(10, 10, 260)))["bed_fit"]["status"] == "fail"
+
+
+# --- part status --------------------------------------------------------------------------------
+
+def test_worst_status_ignores_skipped():
+    assert worst_status(["pass", "skipped"]) == "pass"
+    assert worst_status(["pass", "warn"]) == "warn"
+    assert worst_status(["warn", "fail", "pass"]) == "fail"
+    assert worst_status(["skipped"]) == "pass"
+    assert worst_status([]) == "pass"
