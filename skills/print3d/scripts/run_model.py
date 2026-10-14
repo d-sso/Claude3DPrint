@@ -361,28 +361,41 @@ def _is_size(value):
     )
 
 
+def _def_line(func):
+    """Line where a model function is defined, for errors that have no model frame; None if unknown."""
+    code = getattr(func, "__code__", None)
+    return code.co_firstlineno if code is not None else None
+
+
 def expected_sizes(module, params, parts):
     """Call the model's optional expected(p); returns {part name: (x, y, z)} or None when it isn't defined."""
     if not hasattr(module, "expected"):
         return None
+    func = module.expected
+    def_line = _def_line(func)
     with contextlib.redirect_stdout(sys.stderr):
         try:
-            sizes = module.expected(dict(params))
+            sizes = func(dict(params))
         except (Exception, SystemExit) as exc:
-            raise RunError("check", f"expected(): {type(exc).__name__}: {exc}", exc=exc) from exc
+            in_model = bool(_model_frames(exc, getattr(module, "__file__", "")))
+            raise RunError(
+                "check", f"expected(): {type(exc).__name__}: {exc}", exc=exc, line=None if in_model else def_line
+            ) from exc
     example = 'e.g. return {"main": (p["length"], p["width"], p["height"])}'
     if not isinstance(sizes, dict):
         raise RunError(
-            "check", f"expected() must return a dict of part name -> (x, y, z) in mm, got {type(sizes).__name__}; {example}"
+            "check", f"expected() must return a dict of part name -> (x, y, z) in mm, got {type(sizes).__name__}; {example}",
+            line=def_line,
         )
     unknown = sorted(set(sizes) - set(parts))
     if unknown:
         raise RunError(
-            "check", f"expected() names unknown part(s) {', '.join(map(repr, unknown))}; parts are {', '.join(map(repr, parts))}"
+            "check", f"expected() names unknown part(s) {', '.join(map(repr, unknown))}; parts are {', '.join(map(repr, parts))}",
+            line=def_line,
         )
     for name, size in sizes.items():
         if not _is_size(size):
-            raise RunError("check", f"expected()[{name!r}] must be (x, y, z) in mm, got {size!r}; {example}")
+            raise RunError("check", f"expected()[{name!r}] must be (x, y, z) in mm, got {size!r}; {example}", line=def_line)
     return sizes
 
 

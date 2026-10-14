@@ -150,8 +150,19 @@ def test_expected_error_points_at_model_line(model):
 )
 def test_bad_expected_return_is_check_error(tmp_path, body, needle):
     result, code = run(_inline(tmp_path, BOX + f"def expected(p):\n    {body}\n"))
-    assert code == 1 and result["error"]["stage"] == "check"
+    assert code == 1 and result["error"]["stage"] == "check" and result["error"]["line"] == 7
     assert needle in result["error"]["message"]
+
+
+def test_expected_signature_error_points_at_def_line(tmp_path):
+    result, code = run(_inline(tmp_path, BOX + "def expected():\n    return {}\n"))
+    assert code == 1 and result["error"]["stage"] == "check"
+    assert "TypeError" in result["error"]["message"] and result["error"]["line"] == 7
+
+
+def test_lambda_expected_bad_shape_points_at_its_line(tmp_path):
+    result, code = run(_inline(tmp_path, BOX + "expected = lambda p: (40, 30, 15)\n"))
+    assert code == 1 and "must return a dict" in result["error"]["message"] and result["error"]["line"] == 7
 
 
 def test_expected_not_callable_is_load_error(tmp_path):
