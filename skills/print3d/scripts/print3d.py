@@ -44,13 +44,18 @@ CALIBRATION_INSTRUCTIONS = [
     "that socket's label c, a diametral clearance in mm. Try the peg in each socket and, for each fit, take the "
     "smallest c where the peg: press = can be pushed in by hand (firm force, no tools); snug = goes in without force "
     "and stays put when the plate is turned upside down; sliding = rotates and slides freely with no binding; "
-    "loose = has clearly visible side-to-side play.",
+    "loose = has clearly visible side-to-side play. Start at the loosest socket (row 3, right: 0.5) and work toward "
+    "tighter ones (loose, then sliding, then snug), and do the press test last, pushing only as far as needed to judge: "
+    "the peg can jam in a tight blind socket. Printing a spare peg (duplicate it in the slicer) avoids a stalled test.",
     "Convert each chosen label with fit = c + used - new, where used = result.profile.used[\"holes.compensation\"] "
-    "(the compensation the sockets were built with) and new = holes.compensation from the holes step. This corrects "
+    "(the compensation the sockets were built with) and new = holes.compensation from the holes step. Take used from "
+    "the build that was printed, in its out/calibration_coupon.result.json, and read it before re-running print3d "
+    "calibrate or recording any value: a re-run overwrites that file with the current compensation. This corrects "
     "the sockets for the new compensation, so no second print is needed. Fits may be negative. The values must satisfy "
     "press <= snug <= sliding <= loose; if not, re-test the sockets. If no socket matches a category (for example the "
     "peg is loose even at -0.4), keep the current profile value for that key and tell the user the coupon range was "
-    "exceeded.",
+    "exceeded. If even the tightest socket (-0.4) qualifies for press or snug, keep that key's current value and "
+    "report that the coupon range was exceeded at the tight end.",
     "Peg: measure the printed peg at mid-height with calipers (nominal 10 mm) and report it. It is informational only; "
     "the fits already include it.",
     "Thin fins (labels 0.4, 0.6, 0.8, 1.2, left to right): checks.min_feature = the thinnest fin that printed complete "

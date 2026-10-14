@@ -272,3 +272,21 @@ def test_instructions_describe_layout_by_position(built):
         assert row in text, row
     assert "k = 0..6" in text  # ladder holes, left to right
     assert "0.4, 0.6, 0.8, 1.2" in text
+
+
+def test_instructions_test_fits_loosest_first_with_press_last():
+    text = " ".join(_instructions()).lower()
+    assert "start at the loosest socket" in text
+    assert "press test last" in text
+    assert "spare peg" in text
+
+
+def test_instructions_read_used_from_the_printed_coupon():
+    text = " ".join(_instructions())
+    assert "calibration_coupon.result.json" in text
+    assert "before re-running print3d calibrate" in text
+
+
+def test_instructions_report_tight_end_exceeded():
+    text = " ".join(_instructions()).lower()
+    assert "exceeded at the tight end" in text

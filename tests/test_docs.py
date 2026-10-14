@@ -89,3 +89,7 @@ def test_readme_documents_gauges():
     text = read(REPO / "README.md")
     assert "--set gauges=" in text
     assert "negative" in text.lower()
+
+
+def test_skill_md_reads_used_from_printed_coupon_result():
+    assert "calibration_coupon.result.json" in read(SKILL / "SKILL.md")

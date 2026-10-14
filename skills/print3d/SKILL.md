@@ -88,7 +88,8 @@ When the user reports coupon measurements, follow the `instructions` returned by
 Calibration takes one print. Gauges are drill-bit shanks measured with calipers: `print3d calibrate --set gauges=3.175,3.969,5.159`.
 `holes.compensation` comes from the gauge ladders and is an absolute value, not an adjustment.
 Each fit is the chosen socket's label corrected for the new compensation, `fit = c + used - new`, where `used` is
-`profile.used["holes.compensation"]` in the calibrate result. Fits may be negative (printed shafts print undersize).
+`profile.used["holes.compensation"]` of the build that was printed (its `out/calibration_coupon.result.json`; read it
+before re-running `print3d calibrate`, which overwrites it). Fits may be negative (printed shafts print undersize).
 If a helper is a `PARAMETERS` default and you override that parameter with `--set`, `profile.used` still lists the helper's value.
 Confirm the values with the user, then record them with `print3d profile set key=value ...` and show the result.
 Overrides are stored as quoted dotted keys under `[profile_overrides.<name>]`; `profile set` refuses sub-table forms.
