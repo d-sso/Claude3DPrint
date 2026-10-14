@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 import trimesh
-from build123d import Align, Axis, Box, BuildPart, Cylinder, Locations, Mode, fillet, offset
+from build123d import Align, Axis, Box, BuildPart, Cylinder, Hole, Locations, Mode, PolarLocations, fillet, offset
 
 import check_model
 from check_model import DEFAULTS, check_part, mesh_from_shape, resolve_thresholds, worst_status
@@ -278,3 +278,42 @@ def test_checks_are_repeatable():
         Box(40, 30, 15, align=BED)
         offset(amount=-0.5, openings=part.faces().sort_by(Axis.Z)[-1])
     assert run_checks(part.part) == run_checks(part.part)
+
+
+# --- review fixes: region grouping and speed on dense meshes -----------------------------------
+
+def test_long_thin_lip_on_large_part_is_one_region():
+    # A single 100 mm lip must not fragment into many regions and use up the region cap.
+    with BuildPart() as part:
+        Box(150, 100, 40, align=BED)
+        with Locations((0, 0, 40)):
+            Box(100, 0.6, 3, align=BED)
+    wall = results(run_checks(part.part))["wall"]
+    assert wall["status"] == "fail"
+    assert len(wall["regions"]) == 1 and "in 1 region(s)" in wall["message"]
+
+
+def test_separate_thin_fins_stay_separate_regions():
+    with BuildPart() as part:
+        Box(150, 100, 10, align=BED)
+        with Locations((-40, 0, 10), (40, 0, 10)):
+            Box(0.6, 60, 5, align=BED)
+    regions = results(run_checks(part.part))["wall"]["regions"]
+    assert len(regions) == 2
+    assert sorted(round(r["center"][0] / 40) for r in regions) == [-1, 1]
+
+
+def test_checks_on_a_dense_filleted_part_are_fast():
+    import time
+
+    with BuildPart() as part:
+        Cylinder(30, 6, align=BED)
+        with PolarLocations(21, 8):
+            Hole(3)
+        fillet(part.edges(), 0.5)
+    mesh = mesh_from_shape(part.part)
+    assert len(mesh.faces) > 100_000
+    start = time.perf_counter()
+    report = check_part(mesh, dict(DEFAULTS))
+    assert time.perf_counter() - start < 4.0
+    assert results(report)["wall"]["status"] == "pass"

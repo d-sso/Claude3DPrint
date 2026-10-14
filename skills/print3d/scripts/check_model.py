@@ -160,29 +160,95 @@ def check_bed_fit(mesh, t):
     return _result("bed_fit", "pass", "Fits the bed", **fields)
 
 
-def sample_thickness(mesh, samples):
-    """Local thickness at surface points: inward ray along -normal to the first hit. Returns (points, thickness)."""
+def _first_hits(mesh, origins, directions, start, end):
+    """Distance to the first triangle along each ray between `start` and `end` (nan where there is none).
+
+    trimesh's own ray queries search a box out to the mesh bounds, which makes rays leaving dense fillets test
+    hundreds of thousands of triangles. Here only triangles near each short segment of the ray are tested.
+    """
+    near, far = origins + directions * start, origins + directions * end
+    lows = np.ascontiguousarray(np.minimum(near, far) - 1e-5)
+    highs = np.ascontiguousarray(np.maximum(near, far) + 1e-5)
+    candidates, counts = mesh.triangles_tree.intersection_v(lows, highs)  # one bulk query for all segments
+    distance = np.full(len(origins), np.nan)
+    if len(candidates) == 0:
+        return distance
+    candidates = np.asarray(candidates, dtype=np.int64)
+    ray_id = np.repeat(np.arange(len(origins)), np.asarray(counts, dtype=np.int64))
+    triangles = mesh.triangles[candidates]
+    location, valid = trimesh.intersections.planes_lines(
+        plane_origins=triangles[:, 0],
+        plane_normals=mesh.face_normals[candidates],
+        line_origins=origins[ray_id],
+        line_directions=directions[ray_id],
+    )
+    if not valid.any():
+        return distance
+    barycentric = trimesh.triangles.points_to_barycentric(triangles[valid], location)
+    zero = trimesh.constants.tol.zero
+    inside = ((barycentric > -zero) & (barycentric < 1 + zero)).all(axis=1)
+    rays = ray_id[valid][inside]
+    along = np.einsum("ij,ij->i", location[inside] - origins[rays], directions[rays])
+    keep = (along > start - 1e-6) & (along <= end)
+    np.fmin.at(distance, rays[keep], along[keep])
+    return distance
+
+
+def sample_thickness(mesh, samples, step):
+    """Local thickness at surface points: inward ray along -normal to the first hit.
+
+    Rays march in slices (the first `step` long, each next one twice as long), and only rays without a hit yet
+    go on to the next slice, so thin walls resolve cheaply and thick ones are still measured.
+    Returns (points, thickness, face index of each point).
+    """
     points, face_index = trimesh.sample.sample_surface(mesh, samples, seed=SEED)
     # Add triangle centroids (evenly spaced, capped at `samples`) so small features on large parts are not missed.
     count = min(len(mesh.faces), samples)
     centroid_faces = np.unique(np.linspace(0, len(mesh.faces) - 1, count).astype(np.int64))
     points = np.vstack([points, mesh.triangles_center[centroid_faces]])
-    normals = mesh.face_normals[np.concatenate([face_index, centroid_faces])]
-    hits, ray_index, _ = mesh.ray.intersects_location(points - normals * INWARD_OFFSET, -normals, multiple_hits=False)
+    faces = np.concatenate([face_index, centroid_faces])
+    directions = -mesh.face_normals[faces]
+    origins = points + directions * INWARD_OFFSET
     thickness = np.full(len(points), np.nan)
-    thickness[ray_index] = np.linalg.norm(hits - points[ray_index], axis=1)
+    pending = np.arange(len(points))
+    diagonal = float(np.linalg.norm(mesh.extents)) + 1.0
+    start, end = 0.0, min(step, diagonal)
+    while len(pending):
+        distance = _first_hits(mesh, origins[pending], directions[pending], start, end)
+        hit = np.isfinite(distance)
+        thickness[pending[hit]] = distance[hit] + INWARD_OFFSET
+        pending = pending[~hit]
+        if end >= diagonal:
+            break
+        step *= 2
+        start, end = end, min(end + step, diagonal)
     keep = np.isfinite(thickness)
-    return points[keep], thickness[keep]
+    return points[keep], thickness[keep], faces[keep]
 
 
-def _point_regions(points, values, radius):
-    """Group points by single linkage within radius; each region is reported at its thinnest point."""
+def _point_regions(mesh, points, values, faces, radius):
+    """Group points into regions; each region is reported at its thinnest point.
+
+    Points link when they are within `radius`, or when they lie on connected faces that all hold offending points
+    (large flat faces carry few, widely spaced samples, so distance alone would split one feature into many).
+    """
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
     from scipy.spatial import cKDTree
 
     pairs = cKDTree(points).query_pairs(radius, output_type="ndarray")
-    graph = coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(len(points), len(points)))
+    bad_faces = np.unique(faces)
+    selected = np.zeros(len(mesh.faces), dtype=bool)
+    selected[bad_faces] = True
+    adjacency = mesh.face_adjacency[selected[mesh.face_adjacency].all(axis=1)]
+    face_label = np.zeros(len(mesh.faces), dtype=np.int64)
+    for label, group in enumerate(trimesh.graph.connected_components(adjacency, nodes=bad_faces, min_len=1)):
+        face_label[np.asarray(group)] = label
+    labels = face_label[faces]
+    _, first, inverse = np.unique(labels, return_index=True, return_inverse=True)
+    rows = np.concatenate([pairs[:, 0], np.arange(len(points))])
+    cols = np.concatenate([pairs[:, 1], first[inverse]])
+    graph = coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(len(points), len(points)))
     _, labels = connected_components(graph, directed=False)
     regions = []
     for label in np.unique(labels):
@@ -199,14 +265,15 @@ def _point_regions(points, values, radius):
     return regions
 
 
-def check_thickness(name, points, thickness, limit, radius):
-    """`wall` (limit min_wall) or `thin` (limit min_feature) from the shared thickness samples."""
+def check_thickness(name, mesh, samples, limit, radius):
+    """`wall` (limit min_wall) or `thin` (limit min_feature) from the shared (points, thickness, faces) samples."""
+    points, thickness, faces = samples
     what, fix = ("Wall", "thicken it") if name == "wall" else ("Feature", "thicken or remove it")
     measured = _r3(thickness.min()) if len(thickness) else None
     bad = thickness < limit
     if not bad.any():
         return _result(name, "pass", f"No {what.lower()} thinner than {limit} mm", measured=measured, limit=_r3(limit))
-    regions = _point_regions(points[bad], thickness[bad], radius)
+    regions = _point_regions(mesh, points[bad], thickness[bad], faces[bad], radius)
     return _result(
         name, "fail", f"{what} {measured:.2f} mm < {limit} mm in {len(regions)} region(s); {fix}",
         measured=measured, limit=_r3(limit), regions=regions[:MAX_REGIONS],
@@ -274,10 +341,10 @@ def check_part(mesh, thresholds, expected_size=None):
     if sealed["status"] == "fail":
         results += [_result(name, "skipped", "mesh not sealed: fix that first") for name in ("wall", "thin", "overhang")]
     else:
-        points, thickness = sample_thickness(mesh, t["samples"])
         radius = 2 * t["min_wall"]
-        results.append(check_thickness("wall", points, thickness, t["min_wall"], radius))
-        results.append(check_thickness("thin", points, thickness, t["min_feature"], radius))
+        samples = sample_thickness(mesh, t["samples"], step=radius)
+        results.append(check_thickness("wall", mesh, samples, t["min_wall"], radius))
+        results.append(check_thickness("thin", mesh, samples, t["min_feature"], radius))
         results.append(check_overhang(mesh, t))
     return {
         "status": worst_status(r["status"] for r in results),
