@@ -109,3 +109,86 @@ def load_profile(name=DEFAULT_PROFILE, overrides=None, profiles_dir=None):
         values[section][key] = value
         applied[dotted] = value
     return {"name": name, "file": where, "title": title, "values": values, "overrides": applied}
+
+
+# ---- Model helpers -------------------------------------------------------------------------------------------
+
+# ISO 273 "normal" clearance holes and ISO 4032 hex nut across-flats (AF) and height (m), in mm.
+ISO273_NORMAL = {"M2": 2.4, "M2.5": 2.9, "M3": 3.4, "M4": 4.5, "M5": 5.5, "M6": 6.6, "M8": 9.0}
+ISO4032_AF = {"M2": 4.0, "M2.5": 5.0, "M3": 5.5, "M4": 7.0, "M5": 8.0, "M6": 10.0, "M8": 13.0}
+ISO4032_M = {"M2": 1.6, "M2.5": 2.0, "M3": 2.4, "M4": 3.2, "M5": 4.7, "M6": 5.2, "M8": 6.8}
+
+_active = None
+_used = {}
+
+
+def activate(profile):
+    """Make `profile` (a load_profile dict, or None for the base-profile fallback) active and clear the record."""
+    global _active
+    _active = profile
+    _used.clear()
+
+
+def used():
+    """Every profile value handed out since activate(), as {dotted_key: value}."""
+    return dict(_used)
+
+
+def _profile():
+    global _active
+    if _active is None:
+        _active = load_profile(DEFAULT_PROFILE)
+    return _active
+
+
+def _get(dotted):
+    section, key = split_key(dotted)
+    try:
+        value = _profile()["values"][section][key]
+    except KeyError:
+        raise ValueError(f"Unknown profile key {dotted!r}") from None
+    _used[dotted] = value
+    return value
+
+
+def _choose(what, options, choice):
+    if choice not in options:
+        raise ValueError(f"Unknown {what} {choice!r}; choose from: {', '.join(options)}")
+
+
+def _r3(value):
+    return round(float(value), 3)
+
+
+def fit(kind):
+    """Diametral clearance (hole diameter - shaft diameter) for a printed-to-printed fit: press, snug, sliding, loose."""
+    _choose("fit", list(_profile()["values"]["fits"]), kind)
+    return _r3(_get(f"fits.{kind}"))
+
+
+def hole(d):
+    """CAD diameter for a vertical hole that should print as diameter `d`."""
+    return _r3(float(d) + _get("holes.compensation"))
+
+
+def screw_clearance(size):
+    """Compensated ISO 273 normal clearance hole for a metric screw, e.g. 'M3'."""
+    _choose("screw size", list(ISO273_NORMAL), size)
+    return hole(ISO273_NORMAL[size])
+
+
+def insert_hole(size):
+    """Heat-set insert pilot hole diameter from the profile (not compensated)."""
+    _choose("insert size", list(_profile()["values"]["inserts"]), size)
+    return _r3(_get(f"inserts.{size}"))
+
+
+def nut_pocket(size):
+    """(across_flats, height) for a hex nut pocket: ISO 4032 nut size plus the profile's allowances."""
+    _choose("nut size", list(ISO4032_AF), size)
+    return (_r3(ISO4032_AF[size] + _get("nuts.af_clearance")), _r3(ISO4032_M[size] + _get("nuts.height_clearance")))
+
+
+def profile_value(dotted):
+    """Any value of the active profile by dotted key, e.g. 'printer.layer_height'."""
+    return _r3(_get(dotted))
