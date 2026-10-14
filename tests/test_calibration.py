@@ -205,29 +205,47 @@ def test_everything_fits_the_bed(built):
     assert bb.size.X <= 256 - 10 and bb.size.Y <= 256 - 10 and bb.size.Z <= 256
 
 
-def test_calibrate_command(tmp_path):
+def calibrate(tmp_path, *args):
     config = tmp_path / "config.toml"
     config.write_text(f'parts_dir = "{(tmp_path / "parts").as_posix()}"\n', encoding="utf-8")
     env = {**os.environ, "PRINT3D_CONFIG": str(config)}
-    proc = subprocess.run([sys.executable, str(SCRIPTS / "print3d.py"), "calibrate"],
+    proc = subprocess.run([sys.executable, str(SCRIPTS / "print3d.py"), "calibrate", *args],
                           capture_output=True, text=True, env=env)
-    data = json.loads(proc.stdout)
-    assert proc.returncode == 0, data
+    return proc.returncode, json.loads(proc.stdout)
+
+
+def test_calibrate_command(tmp_path):
+    code, data = calibrate(tmp_path)
+    assert code == 0, data
     out = tmp_path / "parts" / "calibration" / "centauri-carbon-pla-plus" / "out"
     assert (out / "calibration_coupon.3mf").is_file()
     with zipfile.ZipFile(out / "calibration_coupon.3mf") as z:
         model_xml = z.read("3D/3dmodel.model").decode("utf-8")
     assert 'name="coupon"' in model_xml and 'name="peg"' in model_xml
-    assert isinstance(data["instructions"], list) and len(data["instructions"]) >= 4
-    assert any("holes.compensation" in line for line in data["instructions"])
-    assert any("Row 1" in line for line in data["instructions"])
+    assert data["parameters"]["gauges"] == "3,4,5"
+    assert isinstance(data["instructions"], list) and len(data["instructions"]) >= 6
     assert data["profile"]["name"] == "centauri-carbon-pla-plus"
+    assert data["profile"]["used"]["holes.compensation"] == 0.2
 
 
+@pytest.mark.parametrize("value", ["3.175,3.969,5.159", "4"])
+def test_calibrate_set_gauges_stays_text(tmp_path, value):
+    code, data = calibrate(tmp_path, "--set", f"gauges={value}")
+    assert code == 0, data
+    assert data["parameters"]["gauges"] == value  # not a tuple or an int
 
 
+def test_calibrate_unknown_parameter_is_params_error(tmp_path):
+    code, data = calibrate(tmp_path, "--set", "nope=1")
+    assert code != 0 and data["ok"] is False
+    assert data["error"]["stage"] == "params"
 
 
+def test_calibrate_bad_gauge_names_problem(tmp_path):
+    code, data = calibrate(tmp_path, "--set", "gauges=9")
+    assert code != 0 and data["ok"] is False
+    assert data["error"]["stage"] == "build"
+    assert "outside 2-8 mm" in data["error"]["message"]
 
 
 def _instructions():
@@ -236,21 +254,21 @@ def _instructions():
     return print3d.CALIBRATION_INSTRUCTIONS
 
 
-def test_instructions_are_two_pass():
-    steps = _instructions()
-    text = " ".join(steps).lower()
-    assert "reprint" in text and "pass 1" in text and "pass 2" in text
-    for step in steps:
-        if "print3d profile set" in step:
-            assert not ("holes.compensation" in step and "fits." in step), step
+def test_instructions_are_single_print():
+    text = " ".join(_instructions()).lower()
+    assert "one print" in text
+    assert "reprint" not in text and "pass 2" not in text
+    for needle in ("0.1 * k - 0.05", "fit = c + used - new", "press <= snug <= sliding <= loose",
+                   "calipers", "--set gauges=", 'result.profile.used["holes.compensation"]', "peg"):
+        assert needle in text, needle
 
 
-def test_instructions_describe_socket_rows_by_position(built):
+def test_instructions_describe_layout_by_position(built):
     module, _ = built
     text = " ".join(_instructions()).lower()
-    # row 1 (y=0, nearest the raw holes) = first four clearances, left to right (x ascending)
-    assert module.SOCKET_ROWS_Y[0] > module.SOCKET_ROWS_Y[1] and list(module.SOCKET_X) == sorted(module.SOCKET_X)
-    assert "row 1" in text and "row 2" in text
-    assert "0, 0.05, 0.1, 0.15" in text and "0.2, 0.3, 0.4, 0.5" in text
-    assert "position is authoritative" in text
-    assert "negative" in text.lower() or "oversize" in text.lower()
+    assert "notched corner at the far left" in text and "position is authoritative" in text
+    for i in (0, 4, 8):
+        row = ", ".join(f"{c:g}" for c in module.SOCKET_CLEARANCES[i:i + 4])
+        assert row in text, row
+    assert "k = 0..6" in text  # ladder holes, left to right
+    assert "0.4, 0.6, 0.8, 1.2" in text

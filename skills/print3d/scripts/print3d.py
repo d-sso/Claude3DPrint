@@ -4,7 +4,7 @@
     print3d run <model.py> [--set key=value ...] [--formats stl,3mf,step] [--out DIR] [--profile NAME]
                 [--no-check] [--check key=value ...] [--strict]
     print3d check <model.py> [--set key=value ...] [--check key=value ...] [--strict] [--profile NAME]
-    print3d calibrate [--profile NAME] [--out DIR]
+    print3d calibrate [--set key=value ...] [--profile NAME] [--out DIR]
     print3d profile show|set KEY=VALUE ...|reset [KEY ...] [--profile NAME]
 """
 from __future__ import annotations
@@ -22,33 +22,42 @@ SKILL_DIR = SCRIPTS_DIR.parent
 TEMPLATE = SKILL_DIR / "templates" / "model_template.py"
 COUPON = SKILL_DIR / "calibration" / "calibration_coupon.py"
 CALIBRATION_INSTRUCTIONS = [
-    "Calibration is two-pass. Print calibration_coupon.3mf (coupon flat on the bed, peg on its end, no supports) with "
-    "your normal PLA+ settings.",
-    "Pass 1 (holes): the raw holes (labels 3, 4, 5, 8) are printed at their exact nominal size, without compensation. "
-    "Measure each printed diameter with calipers, away from the bottom face (elephant's foot). "
-    "holes.compensation = mean(nominal - measured) over the four holes, rounded to 0.05 mm. This is the new absolute "
-    "value of holes.compensation, not an adjustment to the current one. If the mean is negative (holes print oversize), "
-    "record 0 and tell the user that slicer XY or hole compensation is probably enabled.",
-    "If holes.compensation changes by 0.05 mm or more, record only holes.compensation (print3d profile set "
-    "holes.compensation=<value>), re-run print3d calibrate, reprint the coupon, and only then do pass 2. The sockets "
-    "include the compensation, so fits measured from a print made with a different compensation are off by the difference.",
-    "Pass 2 (fits): first confirm result.profile.used[\"holes.compensation\"] equals the value in the profile, so the "
-    "coupon was built with the current compensation. Identify the sockets by position, not by label (the labels may be "
-    "faint at 0.4 mm nozzle width, so position is authoritative). Hold the plate with the four raw holes and the thin "
-    "fins on the far edge, raw holes on the left and fins on the right. Row 1 is the socket row nearest the holes, read "
-    "left to right: 0, 0.05, 0.1, 0.15. Row 2 is the row nearest you, left to right: 0.2, 0.3, 0.4, 0.5. Each value is "
-    "that socket's diametral clearance c in mm. Try the peg in each socket. Set each fit key to the value c of the "
-    "chosen socket: "
-    "fits.press = the smallest c the peg can be pushed in by hand (firm force, no tools); "
-    "fits.snug = the smallest c where the peg goes in without force and stays put when the plate is turned upside down; "
-    "fits.sliding = the smallest c where the peg rotates and slides freely with no binding; "
-    "fits.loose = the smallest c with clearly visible side-to-side play.",
-    "If no socket matches a category, keep the current profile value for that key and tell the user the coupon range was "
+    "Calibration takes one print. Print calibration_coupon.3mf (coupon flat on the bed, peg on its end, no supports) "
+    "with your normal PLA+ settings.",
+    "Gauges: each ladder row is tested with one gauge, ideally the smooth shank of a drill bit. Before printing, measure "
+    "each gauge shank with calipers. The coupon was built for the diameters in result.parameters[\"gauges\"]; if any "
+    "measured shank differs from its value by 0.02 mm or more, rebuild with print3d calibrate --set gauges=<measured "
+    "values, comma-separated, e.g. 3.175,3.969,5.159> and print that.",
+    "Layout: hold the plate with the notched corner at the far left. The 12 fit sockets are on the left half, the "
+    "gauge ladders on the right half (one row per gauge, in the order of gauges, nearest the far edge first), and the "
+    "thin fins below the ladders. Identify features by position, not by label (labels may be faint at 0.4 mm nozzle "
+    "width, so position is authoritative).",
+    "Holes (holes.compensation): each ladder row has 7 plain, uncompensated through-holes, left to right k = 0..6, "
+    "sized gauge + 0.1 * k mm. For each row, find the smallest hole k that its gauge enters from the top by hand, "
+    "without force, and passes all the way through. That gauge's compensation = 0.1 * k - 0.05 mm. If k = 0 passes, "
+    "use 0 and tell the user that slicer XY or hole compensation is probably enabled. If no hole passes, the range is "
+    "exceeded: report it and leave that gauge out. holes.compensation = the mean over the gauges, rounded to 0.05 mm. "
+    "It is the new absolute value, not an adjustment. If the per-gauge values differ by more than 0.1 mm, report them, "
+    "say that compensation varies with hole size, and suggest a follow-up issue for size-dependent compensation.",
+    "Fits: the sockets are a grid of 3 rows of 4, each row read left to right. Row 1 (nearest the far edge): "
+    "-0.4, -0.3, -0.2, -0.15. Row 2: -0.1, -0.05, 0, 0.05. Row 3 (nearest you): 0.1, 0.2, 0.3, 0.5. Each value is "
+    "that socket's label c, a diametral clearance in mm. Try the peg in each socket and, for each fit, take the "
+    "smallest c where the peg: press = can be pushed in by hand (firm force, no tools); snug = goes in without force "
+    "and stays put when the plate is turned upside down; sliding = rotates and slides freely with no binding; "
+    "loose = has clearly visible side-to-side play.",
+    "Convert each chosen label with fit = c + used - new, where used = result.profile.used[\"holes.compensation\"] "
+    "(the compensation the sockets were built with) and new = holes.compensation from the holes step. This corrects "
+    "the sockets for the new compensation, so no second print is needed. Fits may be negative. The values must satisfy "
+    "press <= snug <= sliding <= loose; if not, re-test the sockets. If no socket matches a category (for example the "
+    "peg is loose even at -0.4), keep the current profile value for that key and tell the user the coupon range was "
     "exceeded.",
+    "Peg: measure the printed peg at mid-height with calipers (nominal 10 mm) and report it. It is informational only; "
+    "the fits already include it.",
     "Thin fins (labels 0.4, 0.6, 0.8, 1.2, left to right): checks.min_feature = the thinnest fin that printed complete "
     "and full height; checks.min_wall = 2 x that value. Only set these if the result differs from the current profile.",
-    "Record pass 1, for example: print3d profile set holes.compensation=0.15",
-    "Record pass 2, for example: print3d profile set fits.press=0.05 fits.snug=0.15 fits.sliding=0.3 fits.loose=0.4",
+    "Record: confirm the values with the user, then record them in one command, for example: print3d profile set "
+    "holes.compensation=0.2 fits.press=-0.2 fits.snug=-0.15 fits.sliding=-0.05 fits.loose=0.05, and show the result "
+    "with print3d profile show.",
 ]
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
@@ -215,7 +224,7 @@ def cmd_calibrate(args):
     profile = resolve_profile(config, args.profile)
     out = args.out or resolve_parts_dir(config) / "calibration" / profile["name"] / "out"
     # The coupon deliberately has fins below min_wall, so printability checks would always report a failure.
-    result, code = run_model.run(COUPON, (), ["stl", "3mf"], out, profile=profile, check=False)
+    result, code = run_model.run(COUPON, args.overrides, ["stl", "3mf"], out, profile=profile, check=False)
     result["instructions"] = CALIBRATION_INSTRUCTIONS
     return result, code
 
@@ -240,6 +249,8 @@ def build_parser():
     p_check.add_argument("--profile", help="printer profile name (default: config 'profile')")
     _add_check_options(p_check)
     p_cal = sub.add_parser("calibrate", help="build the calibration coupon for the active profile")
+    p_cal.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE",
+                       help="coupon parameter, e.g. gauges=3.175,3.969,5.159 (measured gauge diameters)")
     p_cal.add_argument("--profile", help="printer profile name (default: config 'profile')")
     p_cal.add_argument("--out", type=Path, help="output folder (default: <parts_dir>/calibration/<profile>/out)")
     p_prof = sub.add_parser("profile", help="show or edit the active printer profile's calibration overrides")
