@@ -46,3 +46,14 @@ def test_readme_documents_profiles():
     text = read(REPO / "README.md")
     for needle in ("print3d calibrate", "print3d profile show", "print3d profile set", "--profile"):
         assert needle in text, needle
+
+
+def test_documented_helper_calls_are_importable_from_template():
+    template = read(SKILL / "templates" / "model_template.py")
+    line = re.search(r"^from print3d_profile import (.*)$", template, re.M).group(1)
+    imported = {name.strip() for name in line.split("#")[0].split(",")}
+    for doc in (SKILL / "references" / "design-rules.md", SKILL / "SKILL.md"):
+        text = read(doc)
+        for name in ("fit", "hole", "screw_clearance", "insert_hole", "nut_pocket", "profile_value"):
+            if re.search(rf"(?<![\w.]){name}\(", text):
+                assert name in imported, f"{name} used in {doc.name} but not imported by the template"

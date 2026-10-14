@@ -3,7 +3,7 @@
 Print notes: <orientation on the bed, supports needed, material>.
 """
 from build123d import *
-from print3d_profile import fit, hole, screw_clearance, insert_hole, nut_pocket  # printer-calibrated tolerances; never hard-code clearances
+from print3d_profile import fit, hole, screw_clearance, insert_hole, nut_pocket, profile_value  # printer-calibrated tolerances; never hard-code clearances
 
 # Every design decision is a parameter (mm). Override with: print3d run <this file> --set length=60
 PARAMETERS = {

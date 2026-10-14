@@ -18,7 +18,7 @@ the number**, so recalibration updates every part. Everything else is a rule of 
 - **Vertical holes** (axis along Z) print undersize. Use `hole(d)` for a hole that must print as diameter `d`, and
   `screw_clearance("M3")` for screw clearance holes.
 - **Horizontal holes** print oval and sag at the top. Use a teardrop profile, or print undersize and drill.
-- For precision bores, design `hole(d) - 0.1` and ream or drill to size.
+- For precision bores, design `hole(d - 0.1)`, then ream to `d`.
 
 ## 4. Fits between printed parts
 Clearances are **diametral** (hole diameter - shaft diameter). They go on the **hole side**: never shrink the shaft.
@@ -29,6 +29,12 @@ Clearances are **diametral** (hole diameter - shaft diameter). They go on the **
 | snug | `fit("snug")` | lids and caps that hold by friction, removable |
 | sliding | `fit("sliding")` | hinges, axles, sliding lids |
 | loose | `fit("loose")` | parts that drop in, or coarse alignment |
+
+Compensation, so nothing is compensated twice:
+- `fit(kind)` is a clearance added to the shaft diameter inside `hole()`: `hole(shaft_d + fit(kind))`.
+- `screw_clearance()` is **already compensated**. Don't wrap it in `hole()`.
+- `insert_hole()` and `nut_pocket()` are **not** compensated and must **not** be wrapped in `hole()`. They are
+  calibrated as-is (vendor CAD sizes and pocket allowances).
 
 Example: a socket for a printed D6 pin that should slide: `hole(6 + fit("sliding"))`. The fit values are measured
 with the coupon sockets that already include the hole compensation, so `hole()` is the right wrapper.
@@ -71,5 +77,6 @@ with Locations((10, 0, 10)):
 
 ## 9. Snap-fits and flexures
 - Keep strain low: a cantilever at least 5x as long as it is thick, with a fillet at the root.
-- The bend axis must lie in the XY plane, so the beam flexes along the layers and never across them.
+- The beam's **length** must lie in the XY plane (print the cantilever flat), so the bending stress runs along the layers.
+  Never make a cantilever that stands vertically: it delaminates.
 - Expect PLA+ snaps to fatigue. Prefer screws for parts that are opened often.

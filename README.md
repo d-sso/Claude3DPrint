@@ -41,7 +41,7 @@ volume and any errors.
 ## Printer profile and calibration
 Tolerances (hole compensation, fits, insert holes, nut pockets) and printer limits come from a **printer profile**:
 one printer + nozzle + material, in `skills/print3d/profiles/`. The default is `centauri-carbon-pla-plus`.
-Models read it through `from print3d_profile import fit, hole, screw_clearance, insert_hole, nut_pocket`.
+Models read it through `from print3d_profile import fit, hole, screw_clearance, insert_hole, nut_pocket, profile_value`.
 
 Calibrate once per profile:
 ```bash

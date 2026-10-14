@@ -34,7 +34,7 @@ If the part mates with hardware or another part, read references/design-rules.md
 ## 2. Set up the model
 1. Run `print3d new <part-name>` and edit the file it creates.
 2. Put **every design decision in `PARAMETERS`**, in mm, with a comment. Nothing is hard-coded in `build()`. Derive any values that aren't free choices from parameters inside `build()`.
-3. Take every printer-dependent number from the profile: `from print3d_profile import fit, hole, screw_clearance, insert_hole, nut_pocket`. Never hard-code a clearance, hole compensation, insert hole or nut pocket. Helpers may be used as PARAMETERS defaults, so they stay `--set`-able.
+3. Take every printer-dependent number from the profile: `from print3d_profile import fit, hole, screw_clearance, insert_hole, nut_pocket, profile_value`. Never hard-code a clearance, hole compensation, insert hole or nut pocket. Helpers may be used as PARAMETERS defaults, so they stay `--set`-able.
 4. Fill in the docstring: the part's purpose and print notes (orientation, supports).
 5. `build(p)` returns `part.part`, or `{"name": part.part, ...}` for multi-part designs.
 
