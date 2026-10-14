@@ -2,6 +2,7 @@
 
     print3d new <part-name> [--dir PARTS_DIR]
     print3d run <model.py> [--set key=value ...] [--formats stl,3mf,step] [--out DIR] [--profile NAME]
+    print3d calibrate [--profile NAME] [--out DIR]
     print3d profile show|set KEY=VALUE ...|reset [KEY ...] [--profile NAME]
 """
 from __future__ import annotations
@@ -17,6 +18,20 @@ from pathlib import Path
 SCRIPTS_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPTS_DIR.parent
 TEMPLATE = SKILL_DIR / "templates" / "model_template.py"
+COUPON = SKILL_DIR / "calibration" / "calibration_coupon.py"
+CALIBRATION_INSTRUCTIONS = [
+    "Print calibration_coupon.3mf (coupon flat on the bed, peg on its end, no supports) with your normal PLA+ settings.",
+    "Raw holes (labelled 3, 4, 5, 8): measure each diameter with calipers. holes.compensation = mean(nominal - measured), "
+    "rounded to 0.05 mm.",
+    "Fit sockets (labelled with clearance 0 ... 0.5): try the peg in each. Tightest one it presses into by hand -> fits.press; "
+    "first one that holds without play -> fits.snug; first one where it rotates and slides freely -> fits.sliding; "
+    "one with obvious play -> fits.loose.",
+    "Thin fins (labelled 0.4 ... 1.2): the thinnest fin that printed cleanly and full height confirms checks.min_feature; "
+    "2x that confirms checks.min_wall. Only change these if the result clearly differs.",
+    "Record the results: print3d profile set holes.compensation=<v> fits.press=<v> fits.snug=<v> fits.sliding=<v> "
+    "fits.loose=<v>",
+    "If holes.compensation changed, reprint the coupon to confirm the fits (the sockets include compensation).",
+]
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 sys.path.insert(0, str(SCRIPTS_DIR))
@@ -170,6 +185,15 @@ def cmd_new(name, parts_dir):
     return {"ok": True, "model": model.resolve().as_posix()}, 0
 
 
+def cmd_calibrate(args):
+    config = load_config()
+    profile = resolve_profile(config, args.profile)
+    out = args.out or resolve_parts_dir(config) / "calibration" / profile["name"] / "out"
+    result, code = run_model.run(COUPON, (), ["stl", "3mf"], out, profile=profile)
+    result["instructions"] = CALIBRATION_INSTRUCTIONS
+    return result, code
+
+
 def build_parser():
     parser = _Parser(prog="print3d", description="Build parametric build123d models into printable files.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -182,6 +206,9 @@ def build_parser():
     p_run.add_argument("--formats", default="stl,3mf", help="comma-separated: stl,3mf,step")
     p_run.add_argument("--out", type=Path, help="output folder (default: <model dir>/out)")
     p_run.add_argument("--profile", help="printer profile name (default: config 'profile')")
+    p_cal = sub.add_parser("calibrate", help="build the calibration coupon for the active profile")
+    p_cal.add_argument("--profile", help="printer profile name (default: config 'profile')")
+    p_cal.add_argument("--out", type=Path, help="output folder (default: <parts_dir>/calibration/<profile>/out)")
     p_prof = sub.add_parser("profile", help="show or edit the active printer profile's calibration overrides")
     prof_sub = p_prof.add_subparsers(dest="profile_command", required=True)
     p_show = prof_sub.add_parser("show", help="print the merged profile and where each value comes from")
@@ -214,6 +241,8 @@ def main(argv=None):
             profile = resolve_profile(load_config(), args.profile)
             formats = [f.strip().lower() for f in args.formats.split(",") if f.strip()]
             result, code = run_model.run(args.model, args.overrides, formats, args.out, profile=profile)
+        elif args.command == "calibrate":
+            result, code = cmd_calibrate(args)
         else:
             result, code = cmd_profile(args)
     except UsageError as exc:
