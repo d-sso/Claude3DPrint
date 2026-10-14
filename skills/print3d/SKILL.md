@@ -71,5 +71,8 @@ Tell the user:
 ## 6. Calibration
 When the user reports coupon measurements, follow the `instructions` returned by `print3d calibrate` to convert them.
 Each fit key is set to the label value of the chosen socket, and `holes.compensation` is an absolute value, not an adjustment.
+Calibration is two-pass: record `holes.compensation` first and, if it moved by 0.05 or more, rerun `print3d calibrate`
+and reprint before recording the fits (check `profile.used["holes.compensation"]` matches).
+If a helper is a `PARAMETERS` default and you override that parameter with `--set`, `profile.used` still lists the helper's value.
 Confirm the values with the user, then record them with `print3d profile set key=value ...` and show the result.
 Overrides are stored as quoted dotted keys under `[profile_overrides.<name>]`; `profile set` refuses sub-table forms.

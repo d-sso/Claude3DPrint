@@ -36,6 +36,11 @@ Compensation, so nothing is compensated twice:
 - `insert_hole()` and `nut_pocket()` are **not** compensated and must **not** be wrapped in `hole()`. They are
   calibrated as-is (vendor CAD sizes and pocket allowances).
 
+- **Rectangular pockets and slots:** each inner dimension = the mating outer dimension + `fit(kind)`. Fits are diametral
+  (total), so that is fit/2 per side. Don't wrap straight-walled pockets in `hole()`: compensation is measured on round
+  vertical holes, so treat flat-wall fits as approximate and test-fit the critical ones.
+- The fit values were measured with a ~10 mm vertical round pin, so other sizes and orientations are approximate.
+
 Example: a socket for a printed D6 pin that should slide: `hole(6 + fit("sliding"))`. The fit values are measured
 with the coupon sockets that already include the hole compensation, so `hole()` is the right wrapper.
 
@@ -62,8 +67,8 @@ with BuildSketch(top):
 extrude(amount=-h, mode=Mode.SUBTRACT)           # nut pocket from the top face
 with Locations(top):
     Hole(radius=screw_clearance("M3") / 2)        # screw clearance hole
-with Locations((10, 0, 10)):
-    Hole(radius=insert_hole("M3") / 2, depth=5)   # heat-set insert pilot, depth = insert length + 1
+with Locations(top):
+    Hole(radius=insert_hole("M3") / 2, depth=5)   # heat-set insert pilot, depth measured from the top surface (insert length + 1)
 ```
 
 ## 7. First layer

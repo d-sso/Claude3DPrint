@@ -141,3 +141,12 @@ def test_replace_before_single_blank_leaves_one_blank_line(tmp_path):
     assert read_bytes(cfg) == (
         '[profile_overrides.a]\r\n"fits.snug" = 0.2\r\n\r\n[profile_overrides.b]\r\n"fits.snug" = 0.4\r\n'
     )
+
+
+def test_semantic_check_refuses_unreadable_quoted_subtable(tmp_path):
+    cfg = tmp_path / "config.toml"
+    text = 'a = 1\n\n[profile_overrides."p".fits]\nsnug = 0.15\n'
+    cfg.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="could not safely edit"):
+        write_profile_overrides(cfg, "p", {})
+    assert cfg.read_text(encoding="utf-8") == text

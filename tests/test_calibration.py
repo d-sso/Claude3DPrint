@@ -88,7 +88,7 @@ def test_calibrate_command(tmp_path):
     assert 'name="coupon"' in model_xml and 'name="peg"' in model_xml
     assert isinstance(data["instructions"], list) and len(data["instructions"]) >= 4
     assert any("holes.compensation" in line for line in data["instructions"])
-    assert any("label value" in line for line in data["instructions"])
+    assert any("Row 1" in line for line in data["instructions"])
     assert data["profile"]["name"] == "centauri-carbon-pla-plus"
 
 
@@ -149,3 +149,44 @@ def test_labels_are_engraved(built):
     # engraving stays in the top 0.4 mm: the section just below it is unaffected
     assert len(slice_faces(parts["coupon"], 4.5)) == 1
     assert slice_faces(parts["coupon"], 4.5)[0].area == pytest.approx(slice_faces(bare, 4.5)[0].area, abs=0.01)
+
+
+def test_sockets_follow_non_base_compensation():
+    pp.activate(load_profile(overrides={"holes.compensation": 0.13}))
+    try:
+        module = load_model(COUPON)
+        parts = module.build(dict(module.PARAMETERS))
+        radii = circle_radii(parts["coupon"])
+        for c in module.SOCKET_CLEARANCES:
+            assert round((module.PEG_D + c + 0.13) / 2, 3) in radii
+        for d in module.RAW_HOLES:
+            assert round(d / 2, 3) in radii  # raw holes stay nominal
+            assert round((d + 0.13) / 2, 3) not in radii
+    finally:
+        pp.activate(None)
+
+
+def _instructions():
+    import print3d
+
+    return print3d.CALIBRATION_INSTRUCTIONS
+
+
+def test_instructions_are_two_pass():
+    steps = _instructions()
+    text = " ".join(steps).lower()
+    assert "reprint" in text and "pass 1" in text and "pass 2" in text
+    for step in steps:
+        if "print3d profile set" in step:
+            assert not ("holes.compensation" in step and "fits." in step), step
+
+
+def test_instructions_describe_socket_rows_by_position(built):
+    module, _ = built
+    text = " ".join(_instructions()).lower()
+    # row 1 (y=0, nearest the raw holes) = first four clearances, left to right (x ascending)
+    assert module.SOCKET_ROWS_Y[0] > module.SOCKET_ROWS_Y[1] and list(module.SOCKET_X) == sorted(module.SOCKET_X)
+    assert "row 1" in text and "row 2" in text
+    assert "0, 0.05, 0.1, 0.15" in text and "0.2, 0.3, 0.4, 0.5" in text
+    assert "position is authoritative" in text
+    assert "negative" in text.lower() or "oversize" in text.lower()

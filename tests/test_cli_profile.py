@@ -158,3 +158,15 @@ def test_reset_with_no_config_file_creates_nothing(cli):
     code, data = cli("profile", "reset")
     assert code == 0 and data["ok"] is True
     assert not cli.config.exists()
+
+
+def test_quoted_name_subtable_is_refused_and_file_unchanged(cli):
+    cli.config.write_text(
+        cli.config.read_text(encoding="utf-8")
+        + '\n[profile_overrides."centauri-carbon-pla-plus".fits]\nsnug = 0.15\n',
+        encoding="utf-8",
+    )
+    before = cli.config.read_bytes()
+    code, data = cli("profile", "reset", "fits.snug")
+    assert code == 2 and data["ok"] is False
+    assert cli.config.read_bytes() == before

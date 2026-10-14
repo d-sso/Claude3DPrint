@@ -32,6 +32,56 @@ def _render_block(name, values, eol):
     return lines
 
 
+def _flatten(table, prefix=""):
+    flat = {}
+    for key, value in table.items():
+        if isinstance(value, dict):
+            flat.update(_flatten(value, f"{prefix}{key}."))
+        else:
+            flat[f"{prefix}{key}"] = value
+    return flat
+
+
+def _same_values(a, b):
+    if set(a) != set(b):
+        return False
+    for key, value in a.items():
+        other = b[key]
+        try:
+            if float(value) != float(other):
+                return False
+        except (TypeError, ValueError):
+            if value != other:
+                return False
+    return True
+
+
+def _check_semantics(path, profile_name, original, text, values):
+    """Refuse an edit whose parsed result differs from what was intended (e.g. an unrecognised table form)."""
+    fail = ValueError(f"Edit of {path.as_posix()} could not safely edit the profile overrides; config not changed")
+    parsed = tomllib.loads(text)
+    table = parsed.get("profile_overrides", {})
+    stored = table.get(profile_name, {}) if isinstance(table, dict) else {}
+    if not isinstance(stored, dict) or not _same_values(_flatten(stored), dict(values)):
+        raise fail
+    try:
+        before = tomllib.loads(original) if original is not None else None
+    except tomllib.TOMLDecodeError:
+        before = None
+    if before is None:
+        return
+
+    def others(doc):
+        rest = {k: v for k, v in doc.items() if k != "profile_overrides"}
+        po = doc.get("profile_overrides", {})
+        if isinstance(po, dict):
+            rest["profile_overrides"] = {k: v for k, v in po.items() if k != profile_name}
+        return rest
+
+    if others(before) != others(parsed):
+        raise fail
+
+
 def write_profile_overrides(path, profile_name, values):
     """Replace (or create, or remove when `values` is empty) the [profile_overrides.<profile_name>] table."""
     path = Path(path)
@@ -73,6 +123,8 @@ def write_profile_overrides(path, profile_name, values):
         raise ValueError(
             f"Writing {path.as_posix()} would produce invalid TOML ({exc}); config not changed"
         ) from exc
+
+    _check_semantics(path, profile_name, original, text, values)
 
     # Write to a temp file in the same folder, then swap it in atomically. An interruption leaves either
     # the old file or the new one, never a truncated file.

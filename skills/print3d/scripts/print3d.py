@@ -20,12 +20,22 @@ SKILL_DIR = SCRIPTS_DIR.parent
 TEMPLATE = SKILL_DIR / "templates" / "model_template.py"
 COUPON = SKILL_DIR / "calibration" / "calibration_coupon.py"
 CALIBRATION_INSTRUCTIONS = [
-    "Print calibration_coupon.3mf (coupon flat on the bed, peg on its end, no supports) with your normal PLA+ settings.",
-    "Raw holes (labels 3, 4, 5, 8) are printed at their exact nominal size, without compensation. Measure each printed "
-    "diameter with calipers. holes.compensation = mean(nominal - measured) over the four holes, rounded to 0.05 mm. "
-    "This is the new absolute value of holes.compensation, not an adjustment to the current one.",
-    "Fit sockets: each socket label is its diametral clearance c in mm, i.e. its label value: 0, 0.05, 0.1, 0.15, 0.2, 0.3, "
-    "0.4, 0.5 (row 1 left to right, then row 2). Try the peg in each socket. Set each fit key to the label value c of the "
+    "Calibration is two-pass. Print calibration_coupon.3mf (coupon flat on the bed, peg on its end, no supports) with "
+    "your normal PLA+ settings.",
+    "Pass 1 (holes): the raw holes (labels 3, 4, 5, 8) are printed at their exact nominal size, without compensation. "
+    "Measure each printed diameter with calipers, away from the bottom face (elephant's foot). "
+    "holes.compensation = mean(nominal - measured) over the four holes, rounded to 0.05 mm. This is the new absolute "
+    "value of holes.compensation, not an adjustment to the current one. If the mean is negative (holes print oversize), "
+    "record 0 and tell the user that slicer XY or hole compensation is probably enabled.",
+    "If holes.compensation changes by 0.05 mm or more, record only holes.compensation (print3d profile set "
+    "holes.compensation=<value>), re-run print3d calibrate, reprint the coupon, and only then do pass 2. The sockets "
+    "include the compensation, so fits measured from a print made with a different compensation are off by the difference.",
+    "Pass 2 (fits): first confirm result.profile.used[\"holes.compensation\"] equals the value in the profile, so the "
+    "coupon was built with the current compensation. Identify the sockets by position, not by label (the labels may be "
+    "faint at 0.4 mm nozzle width, so position is authoritative). Hold the plate with the four raw holes and the thin "
+    "fins on the far edge, raw holes on the left and fins on the right. Row 1 is the socket row nearest the holes, read "
+    "left to right: 0, 0.05, 0.1, 0.15. Row 2 is the row nearest you, left to right: 0.2, 0.3, 0.4, 0.5. Each value is "
+    "that socket's diametral clearance c in mm. Try the peg in each socket. Set each fit key to the value c of the "
     "chosen socket: "
     "fits.press = the smallest c the peg can be pushed in by hand (firm force, no tools); "
     "fits.snug = the smallest c where the peg goes in without force and stays put when the plate is turned upside down; "
@@ -33,12 +43,10 @@ CALIBRATION_INSTRUCTIONS = [
     "fits.loose = the smallest c with clearly visible side-to-side play.",
     "If no socket matches a category, keep the current profile value for that key and tell the user the coupon range was "
     "exceeded.",
-    "If you change holes.compensation, reprint the coupon and re-test the fits before recording them, because the sockets "
-    "include the compensation.",
-    "Thin fins (labels 0.4, 0.6, 0.8, 1.2): checks.min_feature = the thinnest fin that printed complete and full height; "
-    "checks.min_wall = 2 x that value. Only set these if the result differs from the current profile.",
-    "Record the results, for example: print3d profile set holes.compensation=0.15 fits.press=0.05 fits.snug=0.15 "
-    "fits.sliding=0.3 fits.loose=0.4",
+    "Thin fins (labels 0.4, 0.6, 0.8, 1.2, left to right): checks.min_feature = the thinnest fin that printed complete "
+    "and full height; checks.min_wall = 2 x that value. Only set these if the result differs from the current profile.",
+    "Record pass 1, for example: print3d profile set holes.compensation=0.15",
+    "Record pass 2, for example: print3d profile set fits.press=0.05 fits.snug=0.15 fits.sliding=0.3 fits.loose=0.4",
 ]
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
