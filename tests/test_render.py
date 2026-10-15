@@ -161,3 +161,71 @@ def test_scale_bar_is_round_and_at_most_30_percent(size_mm):
     assert round(mantissa, 6) in (1, 2, 5)
     assert length / mm_per_px <= 0.3 * PANEL + 1e-6
     assert length / mm_per_px > 0.3 * PANEL / 2.5  # the largest round value, not a tiny one
+
+
+# --- check regions and the sheet ----------------------------------------------------------------
+
+from render_model import SHEET_SIZE, check_regions, info_lines, preview_sheet  # noqa: E402
+
+REPORT = {
+    "status": "fail",
+    "results": [
+        {"check": "sealed", "status": "pass", "message": "ok"},
+        {"check": "wall", "status": "fail", "message": "Wall 0.50 mm < 0.8 mm in 1 region(s); thicken it",
+         "regions": [{"center": [0.0, -14.75, 7.5], "value": 0.5}]},
+        {"check": "thin", "status": "pass", "message": "ok"},
+        {"check": "overhang", "status": "warn", "message": "overhang",
+         "regions": [{"center": [1.0, 2.0, 3.0], "area_mm2": 21.04, "max_angle_deg": 90.0}]},
+    ],
+}
+
+
+def test_check_regions_lists_fail_and_warn_regions_in_check_order():
+    regions = check_regions(REPORT)
+    assert [r[0] for r in regions] == ["wall", "overhang"]
+    assert regions[0][1] == "0.50 mm thick at (0.0, -14.8, 7.5)"
+    assert regions[1][1] == "21.0 mm2 at 90° at (1.0, 2.0, 3.0)"
+    assert regions[0][2] == (0.0, -14.75, 7.5)
+    assert check_regions(None) == []
+
+
+INFO = {"bbox": (40.0, 30.0, 20.0), "volume": 8088.0, "profile": "centauri-carbon-pla-plus",
+        "overrides": {"length": 40.0}, "checks": "pass", "sealed": True}
+
+
+def test_info_lines_cap_overrides_and_markers():
+    info = {**INFO, "overrides": {f"p{i}": i for i in range(11)}}
+    regions = [("wall", f"region {i}", (0, 0, 0)) for i in range(13)]
+    lines = info_lines("main", info, regions)
+    assert "  +3 more" in lines
+    assert sum(line.startswith("  p") for line in lines) == 8
+    assert sum(" wall: " in line for line in lines) == 10
+    assert lines[-1] == "  +3 more regions not marked"
+
+
+def test_sheet_size_and_determinism():
+    mesh = cup()
+    sheet = preview_sheet("main", mesh, INFO, check_regions(REPORT))
+    assert sheet.size == SHEET_SIZE and max(SHEET_SIZE) <= 1568
+    again = preview_sheet("main", mesh, INFO, check_regions(REPORT))
+    a, b = io.BytesIO(), io.BytesIO()
+    sheet.save(a, format="PNG")
+    again.save(b, format="PNG")
+    assert a.getvalue() == b.getvalue()
+
+
+def test_sheet_has_cut_faces_only_in_the_section_row():
+    sheet = np.asarray(preview_sheet("main", cup(), INFO))
+    cut = np.all(sheet == np.array(CUT_RGB, dtype=np.uint8), axis=-1)
+    top_row = cut[render_model.TITLE_H:render_model.TITLE_H + PANEL]
+    section_row = cut[render_model.TITLE_H + PANEL:, : 3 * PANEL]
+    assert not top_row.any()
+    for col in range(3):
+        assert section_row[:, col * PANEL:(col + 1) * PANEL].any(), f"section panel {col} has no cut face"
+
+
+def test_unsealed_mesh_still_renders():
+    open_box = box((40, 30, 20), (0, 0, 10))
+    open_box.update_faces(np.arange(len(open_box.faces)) != 0)  # drop one triangle
+    sheet = preview_sheet("main", open_box, {**INFO, "sealed": False})
+    assert sheet.size == SHEET_SIZE

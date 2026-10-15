@@ -321,3 +321,105 @@ def annotate(render_, title):
         draw.line((x, y - 5, x, y + 5), fill=TEXT_RGB, width=1)
     _text(draw, (x1 - px / 2, y - 8), f"{length:g} mm", 12, anchor="mb")
     return render_
+
+
+def _fmt(v):
+    return f"{v:.1f}"
+
+
+def section_planes(mesh):
+    """The three default cuts through the bbox centre: [(title, Section, axis index)]."""
+    c = tuple(float(v) for v in mesh.bounds.mean(axis=0))
+    return [
+        (f"Section y = {_fmt(c[1])}", Section(c, (0, -1, 0)), 1),  # viewed from the front
+        (f"Section x = {_fmt(c[0])}", Section(c, (1, 0, 0)), 0),  # viewed from the right
+        (f"Section z = {_fmt(c[2])}", Section(c, (0, 0, 1)), 2),  # viewed from the top
+    ]
+
+
+def check_regions(part_report):
+    """[(check, short description, center)] for every region of a failing or warning check, in check order."""
+    regions = []
+    for result in (part_report or {}).get("results", []):
+        if result["status"] not in ("fail", "warn"):
+            continue
+        for region in result.get("regions", []):
+            if "value" in region:
+                what = f"{region['value']:.2f} mm thick"
+            elif "area_mm2" in region:
+                what = f"{region['area_mm2']:.1f} mm2 at {region['max_angle_deg']:.0f}°"
+            else:
+                what = result["message"]
+            x, y, z = region["center"]
+            regions.append((result["check"], f"{what} at ({x:.1f}, {y:.1f}, {z:.1f})", tuple(region["center"])))
+    return regions
+
+
+def _truncate(text, limit):
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def preview_sheet(name, mesh, info, regions=()):
+    """One sheet for one part: iso, front, right and top views; three centre sections; an info panel.
+
+    info: {"bbox": (x, y, z), "volume": mm3, "profile": name or None, "overrides": dict,
+    "checks": status or None (skipped), "sealed": bool}. regions: check_regions() output, numbered 1..N.
+    Returns a PIL image of SHEET_SIZE.
+    """
+    regions = list(regions)
+    markers = [(center, i + 1) for i, (_, _, center) in enumerate(regions[:MAX_MARKERS])]
+    ortho = [View("front"), View("right"), View("top")]
+    shared = fit_mm_per_px(mesh, ortho, (PANEL, PANEL))
+    panels = [annotate(render(mesh, View("iso"), markers=markers), "Iso")]
+    for view, title in zip(ortho, ("Front (looking +Y)", "Right (looking -X)", "Top (looking -Z)")):
+        panels.append(annotate(render(mesh, view, mm_per_px=shared, markers=markers), title))
+    suffix = "" if info.get("sealed", True) else " (mesh not sealed: section may be wrong)"
+    for title, section, axis in section_planes(mesh):
+        near = [(p, n) for p, n in markers if abs(p[axis] - section.point[axis]) <= SECTION_MARKER_MM]
+        panels.append(annotate(render(mesh, section=section, mm_per_px=shared, markers=near), title + suffix))
+
+    sheet = Image.new("RGB", SHEET_SIZE, BACKGROUND)
+    draw = ImageDraw.Draw(sheet)
+    bbox = " x ".join(_fmt(v) for v in info["bbox"])
+    _text(draw, (12, TITLE_H / 2), f"{name}  ·  bbox {bbox} mm  ·  checks: {info.get('checks') or 'skipped'}", 18,
+          anchor="lm")
+    for i, panel in enumerate(panels):
+        row, col = divmod(i, 4)
+        sheet.paste(panel.image, (col * PANEL, TITLE_H + row * PANEL))
+    _info_panel(draw, (3 * PANEL + 12, TITLE_H + PANEL + 10), name, info, regions)
+    for col in range(1, 4):
+        draw.line((col * PANEL, TITLE_H, col * PANEL, SHEET_SIZE[1]), fill=GRID_RGB)
+    for y in (TITLE_H, TITLE_H + PANEL):
+        draw.line((0, y, SHEET_SIZE[0], y), fill=GRID_RGB)
+    return sheet
+
+
+def info_lines(name, info, regions):
+    lines = [
+        f"Part: {name}",
+        f"Volume: {info['volume']:.0f} mm3",
+        f"Profile: {info.get('profile') or '-'}",
+        f"Checks: {info.get('checks') or 'skipped'}",
+    ]
+    overrides = [f"  {k} = {v}" for k, v in (info.get("overrides") or {}).items()]
+    if overrides:
+        lines += ["Overrides:"] + overrides[:8] + ([f"  +{len(overrides) - 8} more"] if len(overrides) > 8 else [])
+    if regions:
+        lines.append("Markers:")
+        lines += [_truncate(f" {i + 1} {check}: {what}", 50) for i, (check, what, _) in enumerate(regions[:MAX_MARKERS])]
+        if len(regions) > MAX_MARKERS:
+            lines.append(f"  +{len(regions) - MAX_MARKERS} more regions not marked")
+    return lines
+
+
+def _info_panel(draw, origin, name, info, regions):
+    x, y = origin
+    for line in info_lines(name, info, regions):
+        _text(draw, (x, y), line, 13)
+        y += 17
+
+
+def save_png(image, path):
+    """Write the image as PNG (no metadata, so identical images give identical bytes)."""
+    image.save(path, format="PNG")
+    return path
