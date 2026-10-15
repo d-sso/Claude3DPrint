@@ -194,13 +194,25 @@ INFO = {"bbox": (40.0, 30.0, 20.0), "volume": 8088.0, "profile": "centauri-carbo
 
 
 def test_info_lines_cap_overrides_and_markers():
-    info = {**INFO, "overrides": {f"p{i}": i for i in range(11)}}
-    regions = [("wall", f"region {i}", (0, 0, 0)) for i in range(13)]
-    lines = info_lines("main", info, regions)
+    lines = info_lines("main", {**INFO, "overrides": {f"p{i}": i for i in range(11)}}, [])
     assert "  +3 more" in lines
     assert sum(line.startswith("  p") for line in lines) == 8
+    regions = [("wall", f"region {i}", (0, 0, 0)) for i in range(13)]
+    lines = info_lines("main", INFO, regions)
     assert sum(" wall: " in line for line in lines) == 10
     assert lines[-1] == "  +3 more regions not marked"
+
+
+def test_info_panel_fits_the_sheet_in_the_worst_case():
+    # Review finding: 8 overrides + 10 markers + their headers overflowed the panel and cut off "+N more".
+    info = {**INFO, "overrides": {f"p{i}": i for i in range(12)}}
+    regions = [("wall", f"region {i}", (0, 0, 0)) for i in range(15)]
+    lines = info_lines("main", info, regions)
+    assert len(lines) <= render_model.INFO_MAX_LINES
+    assert render_model.INFO_TOP + render_model.INFO_MAX_LINES * render_model.INFO_LINE_H <= PANEL
+    assert lines[-1] == "  +5 more regions not marked"
+    assert sum(" wall: " in line for line in lines) == 10  # markers keep priority over overrides
+    assert "Overrides:" in lines and any(line.startswith("  +") and line.endswith(" more") for line in lines)
 
 
 def test_sheet_size_and_determinism():
@@ -229,3 +241,52 @@ def test_unsealed_mesh_still_renders():
     open_box.update_faces(np.arange(len(open_box.faces)) != 0)  # drop one triangle
     sheet = preview_sheet("main", open_box, {**INFO, "sealed": False})
     assert sheet.size == SHEET_SIZE
+
+
+# --- cut-face artefacts (review findings) -------------------------------------------------------
+
+from render_model import EDGE_RGB  # noqa: E402
+
+
+def _interior(mask, margin=2):
+    """`mask` shrunk by `margin` pixels on every side."""
+    inner = mask.copy()
+    for _ in range(margin):
+        inner[1:, :] &= inner[:-1, :].copy()
+        inner[:-1, :] &= inner[1:, :].copy()
+        inner[:, 1:] &= inner[:, :-1].copy()
+        inner[:, :-1] &= inner[:, 1:].copy()
+    return inner
+
+
+def test_hidden_features_behind_the_cut_draw_no_lines_inside_the_cut_face():
+    from build123d import Align, Box, BuildPart, Hole, Locations
+
+    with BuildPart() as part:
+        Box(40, 40, 20, align=(Align.CENTER, Align.CENTER, Align.MIN))
+        with Locations((-10, 0, 20)):
+            Hole(2, depth=10)  # blind hole on the kept side, behind the x = 0 cut
+    mesh = render_model.preview_mesh(part.part)
+    r = render(mesh, section=Section((0, 0, 10), (1, 0, 0)))
+    cut = color_mask(r, CUT_RGB)
+    inside = _interior(cut | color_mask(r, EDGE_RGB))
+    assert cut.sum() > 1000
+    assert not (color_mask(r, EDGE_RGB) & inside).any()
+
+
+def test_face_on_the_cut_plane_renders_without_speckle():
+    from build123d import Align, Box, BuildPart, Locations
+
+    with BuildPart() as part:
+        Box(40, 40, 10, align=(Align.CENTER, Align.CENTER, Align.MIN))
+        with Locations((10, 0, 10)):
+            Box(20, 40, 10, align=(Align.CENTER, Align.CENTER, Align.MIN))  # step on the +X half: centre z = 10
+    mesh = render_model.preview_mesh(part.part)
+    (_, section, _), = [s for s in render_model.section_planes(mesh) if s[2] == 2]
+    assert section.point[2] == pytest.approx(10)
+    r = render(mesh, section=section)
+    (lx0, ly0), (lx1, ly1) = r.project([(-19, 19, 10), (-1, -19, 10)])  # the base's top face, exactly on the cut
+    left = (slice(int(ly0), int(ly1)), slice(int(lx0), int(lx1)))
+    assert not color_mask(r, CUT_RGB)[left].any() and not color_mask(r, EDGE_RGB)[left].any()
+    (rx0, ry0), (rx1, ry1) = r.project([(1, 19, 10), (19, -19, 10)])  # the step, cut through
+    assert color_mask(r, CUT_RGB)[int(ry0):int(ry1), int(rx0):int(rx1)].all()

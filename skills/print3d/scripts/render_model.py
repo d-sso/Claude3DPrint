@@ -23,6 +23,8 @@ CONTENT = (15, 34, 15, 52)  # px margins inside a panel: left, top (title), righ
 MAX_MARKERS = 10
 SECTION_MARKER_MM = 2.0  # markers within this distance of a cut plane are shown on that section
 SHARP_DEG = 30.0  # faces meeting at more than this angle draw an edge
+INFO_TOP, INFO_LINE_H = 10, 17  # px, info panel text start and line height
+INFO_MAX_LINES = (PANEL - 2 * INFO_TOP) // INFO_LINE_H  # lines that fit in the info panel
 
 BACKGROUND = (255, 255, 255)
 PART_RGB = np.array([200, 204, 210], dtype=float)
@@ -202,9 +204,10 @@ def _edges(depth, face, normals, cut, mm_per_px):
     for a, b in (((slice(None, -1), slice(None)), (slice(1, None), slice(None))),
                  ((slice(None), slice(None, -1)), (slice(None), slice(1, None)))):
         both = filled[a] & filled[b]
+        surface = both & ~(cut[a] & cut[b])  # a cut face is flat: what lies behind it must not draw lines
         jump = filled[a] != filled[b]
-        jump |= both & (np.abs(z[a] - z[b]) > 4 * mm_per_px)
-        jump |= both & ((n[a] * n[b]).sum(axis=-1) < cos_sharp)
+        jump |= surface & (np.abs(z[a] - z[b]) > 4 * mm_per_px)
+        jump |= surface & ((n[a] * n[b]).sum(axis=-1) < cos_sharp)
         jump |= both & (cut[a] != cut[b])
         edge[a] |= jump & filled[a]
         edge[b] |= jump & filled[b]
@@ -232,7 +235,10 @@ def render(mesh, view=None, *, section=None, mm_per_px=None, size=(PANEL, PANEL)
 
     triangles = mesh.triangles
     xy = result.project(triangles.reshape(-1, 3)).reshape(-1, 3, 2)
-    keep = None if section is None else float(np.asarray(section.point, dtype=float) @ forward)
+    keep = None
+    if section is not None:
+        # A face lying on the plane is kept (seen as surface) at every pixel, not split by rounding into speckle.
+        keep = float(np.asarray(section.point, dtype=float) @ forward) - 1e-6 * max(1.0, float(np.ptp(corners, axis=0).max()))
     depth, face = _rasterize(xy, triangles @ forward, width, height, keep)
     result.depth = depth
     if len(mesh.faces) == 0:  # nothing to draw: a blank panel (markers still drawn)
@@ -386,7 +392,7 @@ def preview_sheet(name, mesh, info, regions=()):
     for i, panel in enumerate(panels):
         row, col = divmod(i, 4)
         sheet.paste(panel.image, (col * PANEL, TITLE_H + row * PANEL))
-    _info_panel(draw, (3 * PANEL + 12, TITLE_H + PANEL + 10), name, info, regions)
+    _info_panel(draw, (3 * PANEL + 12, TITLE_H + PANEL + INFO_TOP), name, info, regions)
     for col in range(1, 4):
         draw.line((col * PANEL, TITLE_H, col * PANEL, SHEET_SIZE[1]), fill=GRID_RGB)
     for y in (TITLE_H, TITLE_H + PANEL):
@@ -401,22 +407,26 @@ def info_lines(name, info, regions):
         f"Profile: {info.get('profile') or '-'}",
         f"Checks: {info.get('checks') or 'skipped'}",
     ]
-    overrides = [f"  {k} = {v}" for k, v in (info.get("overrides") or {}).items()]
-    if overrides:
-        lines += ["Overrides:"] + overrides[:8] + ([f"  +{len(overrides) - 8} more"] if len(overrides) > 8 else [])
+    markers = []
     if regions:
-        lines.append("Markers:")
-        lines += [_truncate(f" {i + 1} {check}: {what}", 50) for i, (check, what, _) in enumerate(regions[:MAX_MARKERS])]
+        markers.append("Markers:")
+        markers += [_truncate(f" {i + 1} {check}: {what}", 50) for i, (check, what, _) in enumerate(regions[:MAX_MARKERS])]
         if len(regions) > MAX_MARKERS:
-            lines.append(f"  +{len(regions) - MAX_MARKERS} more regions not marked")
-    return lines
+            markers.append(f"  +{len(regions) - MAX_MARKERS} more regions not marked")
+    overrides = [_truncate(f"  {k} = {v}", 50) for k, v in (info.get("overrides") or {}).items()]
+    if overrides:
+        # The markers legend has priority; overrides get the lines that are left (at most 8).
+        room = INFO_MAX_LINES - len(lines) - len(markers) - 1  # below the "Overrides:" header
+        shown = overrides if len(overrides) <= min(8, room) else overrides[:max(0, min(8, room - 1))]
+        lines += ["Overrides:"] + shown + ([f"  +{len(overrides) - len(shown)} more"] if len(shown) < len(overrides) else [])
+    return lines + markers
 
 
 def _info_panel(draw, origin, name, info, regions):
     x, y = origin
     for line in info_lines(name, info, regions):
         _text(draw, (x, y), line, 13)
-        y += 17
+        y += INFO_LINE_H
 
 
 def save_png(image, path):
