@@ -429,6 +429,42 @@ def stage_check(module, params, parts, thresholds, sources, result):
     }
 
 
+def stage_preview(parts, stem, out, profile_name, result):
+    """Render one preview sheet per part into out/. Never raises: a failure becomes a warning for that part."""
+    try:
+        import render_model
+    except ImportError as exc:  # e.g. pillow missing because setup.ps1 wasn't re-run after an update
+        result["warnings"].append(
+            f"Preview skipped: the Python package {exc.name or str(exc)!r} is not installed. "
+            "Re-run skills/print3d/scripts/setup.ps1 to update the print3d environment."
+        )
+        return
+
+    single = len(parts) == 1
+    for entry in result["parts"]:
+        name = entry["name"]
+        path = out / f"{stem if single else f'{stem}-{name}'}.preview.png"
+        try:
+            report = None if result["checks"] is None else result["checks"]["parts"].get(name)
+            sealed = report is None or all(r["status"] != "fail" for r in report["results"] if r["check"] == "sealed")
+            info = {
+                "bbox": entry["bbox_mm"]["size"],
+                "volume": entry["volume_mm3"],
+                "profile": profile_name,
+                "overrides": result["overrides"],
+                "checks": None if report is None else report["status"],
+                "sealed": sealed,
+            }
+            with contextlib.redirect_stdout(sys.stderr):
+                mesh = render_model.preview_mesh(parts[name])
+                sheet = render_model.preview_sheet(name, mesh, info, render_model.check_regions(report))
+                render_model.save_png(sheet, path)
+        except Exception as exc:  # the preview is advisory: never fail a build that exported fine
+            result["warnings"].append(f"Preview failed for part {name!r}: {type(exc).__name__}: {exc}")
+            continue
+        entry["files"]["preview"] = path.resolve().as_posix()
+
+
 def _timed(result, name, fn, *args):
     start = time.perf_counter()
     value = fn(*args)
@@ -456,11 +492,13 @@ def run(
     config_checks=None,
     strict=False,
     export=True,
+    preview=True,
 ):
     """Load, parameterise, build, export and check one model. Returns (result, exit_code).
 
     `profile` is a print3d_profile.load_profile() dict; None loads the default base profile.
     export=False (print3d check) writes nothing to disk. check=False (--no-check) leaves result["checks"] as None.
+    preview=True renders one preview sheet per part into the output folder; it only applies when export=True.
     """
     model_path = Path(model_path).resolve()
     result = {
@@ -502,6 +540,10 @@ def run(
         if check:
             stage = "check"
             _timed(result, "check", stage_check, module, params, parts, thresholds, sources, result)
+
+        if export and preview:
+            stage = "preview"
+            _timed(result, "preview", stage_preview, parts, model_path.stem, out, profile["name"], result)
         result["ok"] = True
     except RunError as err:
         result["error"] = error_info(err, model_path)

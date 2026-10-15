@@ -98,3 +98,14 @@ def test_skill_md_reads_used_from_printed_coupon_result():
 def test_skill_documents_thickness_ray_limits():
     text = read(SKILL / "SKILL.md")
     assert "sharp inside corners" in text and "curved thin shells" in text
+
+
+def test_docs_cover_visual_preview():
+    skill = read(SKILL / "SKILL.md")
+    assert "<!-- #4" not in skill  # the placeholder is replaced by the visual review checklist
+    for needle in ("files.preview", "--no-preview", "Visual review", "orange cut face", "scale bar", "Markers",
+                   "the visual review"):
+        assert needle in skill, needle
+    readme = read(REPO / "README.md")
+    for needle in (".preview.png", "--no-preview", "section cuts"):
+        assert needle in readme, needle

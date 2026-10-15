@@ -39,7 +39,9 @@ You can also run the tool yourself:
 ```
 Each run writes the model's files to `out/` next to the model, plus `<model>.result.json` with its dimensions,
 volume, any errors, and the printability checks: sealed mesh, expected size, bed fit, wall thickness, thin
-features and overhangs. To check without exporting:
+features and overhangs. Each run also renders a preview sheet per part, `out/<model>.preview.png`: iso, front, right
+and top views and three section cuts, with axes, scale bars and numbered markers on failing check regions
+(`--no-preview` skips it). To check without exporting (no files, no preview):
 ```bash
 ~/.claude/skills/print3d/scripts/print3d check ~/3DParts/cable-clip/cable-clip.py --strict
 ```
