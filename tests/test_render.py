@@ -1,0 +1,163 @@
+"""Unit tests for render_model: projection, z-buffer, section cut faces, markers, scale bar and the sheet."""
+import io
+
+import numpy as np
+import pytest
+import trimesh
+
+import render_model
+from render_model import CUT_RGB, MARKER_RGB, PANEL, Section, View, fit_mm_per_px, render, scale_bar_mm
+
+
+def box(extents, center):
+    return trimesh.creation.box(extents=extents, transform=trimesh.transformations.translation_matrix(center))
+
+
+def cup(length=40.0, width=30.0, height=20.0, wall=2.0, floor=3.0):
+    """Open-top cup on the bed (2 mm walls, 3 mm floor), as one closed mesh from build123d."""
+    from build123d import Align, Box, BuildPart, Locations, Mode
+
+    bed = (Align.CENTER, Align.CENTER, Align.MIN)
+    with BuildPart() as part:
+        Box(length, width, height, align=bed)
+        with Locations((0, 0, floor)):
+            Box(length - 2 * wall, width - 2 * wall, height, align=bed, mode=Mode.SUBTRACT)
+    return render_model.preview_mesh(part.part)
+
+
+def pixels(r):
+    return np.asarray(r.image)
+
+
+def color_mask(r, rgb):
+    return np.all(pixels(r) == np.array(rgb, dtype=np.uint8), axis=-1)
+
+
+# --- views and projection -----------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "name, right, up",
+    [
+        ("front", (1, 0, 0), (0, 0, 1)),
+        ("back", (-1, 0, 0), (0, 0, 1)),
+        ("right", (0, 1, 0), (0, 0, 1)),
+        ("left", (0, -1, 0), (0, 0, 1)),
+        ("top", (1, 0, 0), (0, 1, 0)),
+        ("bottom", (1, 0, 0), (0, -1, 0)),
+    ],
+)
+def test_named_view_axes(name, right, up):
+    r, u, _ = View(name).basis()
+    assert r == pytest.approx(right) and u == pytest.approx(up)
+
+
+def test_iso_sees_front_right_and_top():
+    right, up, forward = View("iso").basis()
+    assert forward[1] > 0 and forward[0] < 0 and forward[2] < 0  # looks toward +Y, -X, -Z
+    assert up[2] > 0 and right[0] > 0 and right[1] > 0
+
+
+def test_unknown_view_and_zero_direction_raise():
+    with pytest.raises(ValueError, match="Unknown view 'side'"):
+        View("side").basis()
+    with pytest.raises(ValueError, match="must not be zero"):
+        View(direction=(0, 0, 0)).basis()
+
+
+def test_free_direction_along_z_uses_y_up():
+    _, up, _ = View(direction=(0, 0, -1)).basis()
+    assert up == pytest.approx((0, 1, 0))
+
+
+def test_project_front_maps_x_right_and_z_up():
+    r = render(box((40, 30, 20), (0, 0, 10)), View("front"))
+    (x0, y0), (x1, y1) = r.project([(-20, 0, 0), (20, 0, 20)])
+    assert x1 > x0 and y1 < y0  # +X right, +Z up (pixel y grows downward)
+    assert (x1 - x0) * r.mm_per_px == pytest.approx(40)
+    assert (y0 - y1) * r.mm_per_px == pytest.approx(20)
+
+
+def test_part_fills_the_projected_rectangle():
+    r = render(box((40, 30, 20), (0, 0, 10)), View("front"))
+    (x0, y0), (x1, y1) = r.project([(-20, 0, 20), (20, 0, 0)])
+    filled = np.isfinite(r.depth)
+    cols = np.nonzero(filled.any(axis=0))[0]
+    rows = np.nonzero(filled.any(axis=1))[0]
+    assert cols[0] == pytest.approx(x0, abs=1) and cols[-1] == pytest.approx(x1, abs=1)
+    assert rows[0] == pytest.approx(y0, abs=1) and rows[-1] == pytest.approx(y1, abs=1)
+
+
+def test_shared_scale_fits_every_ortho_view():
+    mesh = box((100, 20, 10), (0, 0, 5))
+    views = [View("front"), View("right"), View("top")]
+    shared = fit_mm_per_px(mesh, views, (PANEL, PANEL))
+    assert shared == pytest.approx(max(fit_mm_per_px(mesh, [v], (PANEL, PANEL)) for v in views))
+
+
+# --- z-buffer -----------------------------------------------------------------------------------
+
+def test_nearer_box_hides_the_one_behind():
+    near = box((10, 10, 10), (0, -20, 5))  # front view looks along +Y, so smaller y is nearer
+    far = box((30, 10, 30), (0, 20, 15))
+    mesh = trimesh.util.concatenate([near, far])
+    r = render(mesh, View("front"))
+    (cx, cy), = r.project([(0, 0, 5)])
+    assert r.depth[int(cy), int(cx)] == pytest.approx(-25, abs=1e-6)  # near box's front face at y = -25
+    order_swapped = render(trimesh.util.concatenate([far, near]), View("front"))
+    assert order_swapped.depth[int(cy), int(cx)] == pytest.approx(-25, abs=1e-6)  # not painter's order
+
+
+# --- sections -----------------------------------------------------------------------------------
+
+def test_cup_section_paints_walls_and_floor_but_not_the_cavity():
+    mesh = cup()
+    r = render(mesh, section=Section((0, 0, 10), (0, -1, 0)))  # cut at y = 0, viewed from the front
+    cut = color_mask(r, CUT_RGB)
+    (wall_x, wall_y), (cav_x, cav_y), (floor_x, floor_y) = r.project([(-19, 0, 10), (0, 0, 10), (0, 0, 1.5)])
+    assert cut[int(wall_y), int(wall_x)]
+    assert cut[int(floor_y), int(floor_x)]
+    assert not cut[int(cav_y), int(cav_x)]  # the cavity shows the far inner wall, not cut material
+    assert np.isfinite(r.depth[int(cav_y), int(cav_x)])
+
+
+def test_section_through_solid_is_cut_everywhere_inside():
+    r = render(box((40, 30, 20), (0, 0, 10)), section=Section((0, 0, 10), (0, 0, 1)))
+    (x, y), = r.project([(0, 0, 10)])
+    cut = color_mask(r, CUT_RGB)
+    assert cut[int(y) - 50:int(y) + 50, int(x) - 50:int(x) + 50].all()
+
+
+def test_section_beyond_the_part_has_no_cut_face():
+    mesh = box((40, 30, 20), (0, 0, 10))
+    r = render(mesh, section=Section((0, 0, 30), (0, 0, 1)), mm_per_px=fit_mm_per_px(mesh, [View("top")], (PANEL, PANEL)))
+    assert not color_mask(r, CUT_RGB).any()
+    gone = render(mesh, section=Section((0, 0, -5), (0, 0, 1)))  # everything removed
+    assert not np.isfinite(gone.depth).any()
+
+
+def test_empty_mesh_renders_a_blank_panel():
+    r = render(trimesh.Trimesh(), View("front"))
+    assert r.image.size == (PANEL, PANEL) and not np.isfinite(r.depth).any()
+
+
+# --- markers and annotations --------------------------------------------------------------------
+
+def test_visible_marker_is_filled_at_its_projection_and_hidden_marker_is_hollow():
+    mesh = box((40, 30, 20), (0, 0, 10))
+    front_point, back_point = (-10, -15, 10), (10, 15, 10)  # on the front face, and on the hidden back face
+    r = render(mesh, View("front"), markers=[(front_point, 1), (back_point, 2)])
+    red = color_mask(r, MARKER_RGB)
+    (fx, fy), (bx, by) = r.project([front_point, back_point])
+    assert red[int(fy) + 4, int(fx) + 4]  # filled disc: red off-centre
+    assert not red[int(by) + 2, int(bx) + 2]  # hollow ring: no red just off-centre
+    assert red[int(by), int(bx) + 6] or red[int(by), int(bx) + 7]  # but red on the ring
+
+
+@pytest.mark.parametrize("size_mm", [2, 7, 20, 60, 250])
+def test_scale_bar_is_round_and_at_most_30_percent(size_mm):
+    mm_per_px = fit_mm_per_px(box((size_mm,) * 3, (0, 0, size_mm / 2)), [View("front")], (PANEL, PANEL))
+    length = scale_bar_mm(mm_per_px, PANEL)
+    mantissa = length / 10 ** np.floor(np.log10(length))
+    assert round(mantissa, 6) in (1, 2, 5)
+    assert length / mm_per_px <= 0.3 * PANEL + 1e-6
+    assert length / mm_per_px > 0.3 * PANEL / 2.5  # the largest round value, not a tiny one
