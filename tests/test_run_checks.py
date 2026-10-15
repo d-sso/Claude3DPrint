@@ -47,7 +47,7 @@ def test_good_box_passes_every_check_and_strict_exits_0(model):
     assert set(check_status(result).values()) == {"pass"}
     assert checks["thresholds"]["min_wall"] == 0.8 and checks["sources"]["min_wall"] == "profile"
     assert checks["sources"]["samples"] == "default"
-    assert set(result["timings_s"]) == {"load", "build", "export", "check"}
+    assert set(result["timings_s"]) == {"load", "build", "export", "check", "preview"}
     assert result["timings_s"]["check"] < 5
 
 

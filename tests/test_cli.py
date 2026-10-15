@@ -56,7 +56,15 @@ def test_run_repeated_set(cli, tmp_path):
 def test_run_formats_option(cli, tmp_path):
     code, data = cli("run", copy_fixture(tmp_path, "good_box.py"), "--formats", "stl,step")
     assert code == 0
-    assert set(data["parts"][0]["files"]) == {"stl", "step"} and data["files"] == {}
+    assert set(data["parts"][0]["files"]) == {"stl", "step", "preview"} and data["files"] == {}
+
+
+def test_run_no_preview_option(cli, tmp_path):
+    model = copy_fixture(tmp_path, "good_box.py")
+    code, data = cli("run", model, "--no-preview")
+    assert code == 0
+    assert "preview" not in data["parts"][0]["files"]
+    assert not list((model.parent / "out").glob("*.png"))
 
 
 def test_model_prints_do_not_corrupt_stdout(cli, tmp_path):

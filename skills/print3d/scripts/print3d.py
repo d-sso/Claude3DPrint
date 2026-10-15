@@ -2,7 +2,7 @@
 
     print3d new <part-name> [--dir PARTS_DIR]
     print3d run <model.py> [--set key=value ...] [--formats stl,3mf,step] [--out DIR] [--profile NAME]
-                [--no-check] [--check key=value ...] [--strict]
+                [--no-check] [--check key=value ...] [--strict] [--no-preview]
     print3d check <model.py> [--set key=value ...] [--check key=value ...] [--strict] [--profile NAME]
     print3d calibrate [--set key=value ...] [--profile NAME] [--out DIR]
     print3d profile show|set KEY=VALUE ...|reset [KEY ...] [--profile NAME]
@@ -247,6 +247,7 @@ def build_parser():
     p_run.add_argument("--out", type=Path, help="output folder (default: <model dir>/out)")
     p_run.add_argument("--profile", help="printer profile name (default: config 'profile')")
     p_run.add_argument("--no-check", dest="check", action="store_false", help="skip the printability checks")
+    p_run.add_argument("--no-preview", dest="preview", action="store_false", help="skip the preview sheet render")
     _add_check_options(p_run)
     p_check = sub.add_parser("check", help="build a model and run the printability checks, without exporting")
     p_check.add_argument("model", type=Path)
@@ -301,6 +302,7 @@ def main(argv=None):
             result, code = run_model.run(
                 args.model, args.overrides, formats, args.out, profile=profile, check=args.check,
                 check_pairs=args.check_pairs, config_checks=config_checks(config), strict=args.strict,
+                preview=args.preview,
             )
         elif args.command == "check":
             config = load_config()
