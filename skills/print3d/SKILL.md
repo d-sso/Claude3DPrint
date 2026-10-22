@@ -21,6 +21,7 @@ Commands:
 - `print3d check <model.py> [--set key=value ...] [--check key=value ...] [--strict]`: builds and checks without writing any files.
 - `print3d calibrate [--set gauges=...] [--profile NAME]`: builds the calibration coupon for the active printer profile and prints measuring instructions. `--set gauges=3.175,3.969,5.159` sets the measured gauge (drill-bit shank) diameters.
 - `print3d profile show|set KEY=VALUE ...|reset [KEY ...] [--profile NAME]`: shows the active profile, or records/removes calibrated values. Never hand-edit `config.toml`.
+- `print3d assemble <assembly.py> [--set key=value ...] [--level unit|layout|all] [--unit NAME] [--layout NAME] [--strict]`: checks how parts fit together (section 7).
 - `--profile NAME` on `run`/`check`/`calibrate`/`profile` uses another printer profile for that command. A new material or nozzle needs its own profile file and its own calibration.
 
 ## 1. Gather requirements
@@ -104,3 +105,12 @@ before re-running `print3d calibrate`, which overwrites it). Fits may be negativ
 If a helper is a `PARAMETERS` default and you override that parameter with `--set`, `profile.used` still lists the helper's value.
 Confirm the values with the user, then record them with `print3d profile set key=value ...` and show the result.
 Overrides are stored as quoted dotted keys under `[profile_overrides.<name>]`; `profile set` refuses sub-table forms.
+
+## 7. Assemblies
+Use this for projects whose parts mate with each other or with hardware. Read `references/assemblies.md` first; it has the declaration API, the workflow and how to read results.
+1. Derive the checks from the design document: units, layouts, interfaces, hardware and stand-ins, targets, each with its source section.
+2. **Ask** for any value that matters but is missing or unclear (a bought component's real size). Never guess it.
+3. Present the list, with any document conflicts, and **confirm** it with the user before writing `assembly.py`.
+4. Never take an expected value from the model being checked. A failing target is a finding: raise it, never adjust the target to match the model.
+5. Record confirmed document conflicts in `Assembly(notes=[...])` so they appear in `warnings`.
+6. Run `print3d assemble`, and review every evidence sheet before hand-off, describing what it shows.

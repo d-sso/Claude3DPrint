@@ -50,6 +50,11 @@ Record calibrated values there, for example with `print3d profile set checks.min
 profile, use `[checks]` in `config.toml` (for every profile; see `config.example.toml`), a model's `CHECKS` dict,
 or `--check key=value` for one run. `--no-check` skips the checks.
 
+For projects of several mating parts, `print3d assemble <assembly.py>` checks the assembled whole: shared values from
+`interfaces.py`, bolted joints, snap engagement, seats, passages through neighbouring units, overlaps and
+design targets, with a coloured section sheet per check in `out/assembly/`. Claude derives the checks from your
+design document and confirms them with you first; see `skills/print3d/references/assemblies.md`.
+
 Exit codes: `0` ok, `1` model error, `2` usage error, `3` a check failed under `--strict`.
 
 ## Printer profile and calibration

@@ -109,3 +109,49 @@ def test_docs_cover_visual_preview():
     readme = read(REPO / "README.md")
     for needle in (".preview.png", "--no-preview", "section cuts"):
         assert needle in readme, needle
+
+
+def test_skill_mentions_assemble():
+    text = read(SKILL / "SKILL.md")
+    for needle in ("print3d assemble", "references/assemblies.md", "confirm", "notes", "Ask"):
+        assert needle in text, needle
+    assert len(text.splitlines()) < 150
+
+
+def test_assembly_template_loads(tmp_path):
+    import shutil
+
+    import assemble_model
+
+    (tmp_path / "parts" / "part-name").mkdir(parents=True)
+    shutil.copy(SKILL / "templates" / "model_template.py", tmp_path / "parts" / "part-name" / "part-name.py")
+    shutil.copy(SKILL / "templates" / "assembly_template.py", tmp_path / "assembly.py")
+    shutil.copy(SKILL / "templates" / "interfaces_template.py", tmp_path / "interfaces.py")
+    result, code = assemble_model.assemble(tmp_path / "assembly.py", out_dir=tmp_path / "out", sheets=False)
+    assert result["ok"], result["error"]
+    assert code == 0
+
+
+def test_design_rules_engagement():
+    text = read(SKILL / "references" / "design-rules.md")
+    assert "Fastener engagement" in text and "Snap engagement" in text
+
+
+def test_assemblies_reference_examples_match_api():
+    import print3d_assembly
+
+    text = read(SKILL / "references" / "assemblies.md")
+    names = set(re.findall(r"\b([A-Z][a-z]+[A-Za-z]*)\(", text))
+    api = {n for n in dir(print3d_assembly) if n[0].isupper()}
+    declared = names & api
+    for needed in ("Assembly", "Unit", "Layout", "Part", "Screw", "Nut", "StandIn", "Bolted", "NutPocket", "Snap",
+                   "Seat", "Passage", "Clear", "Size", "Gap", "Step", "Position"):
+        assert needed in declared, needed
+    for name in re.findall(r"`(?:print3d_assembly\.)?([A-Z][A-Za-z]+)`", text):
+        if name in ("Location", "PARAMETERS", "INTERFACES", "None", "True", "False"):
+            continue
+        assert hasattr(print3d_assembly, name) or name in ("Box", "Cylinder"), name
+
+
+def test_readme_mentions_assemblies():
+    assert "print3d assemble" in read(REPO / "README.md")
