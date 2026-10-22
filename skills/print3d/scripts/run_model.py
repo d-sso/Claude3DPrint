@@ -20,6 +20,7 @@ import traceback
 from pathlib import Path
 
 import print3d_profile
+import print3d_shared
 
 LINEAR_TOL = 0.01  # mm, STL/3MF tessellation tolerance
 ANGULAR_TOL = 0.1  # rad
@@ -103,18 +104,32 @@ def merge_parameters(defaults, raw):
 PART_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
-def load_model(path):
-    """Import a model file as a fresh module and validate its contract."""
+def load_model(path, shared_overrides=None):
+    """Import a model file as a fresh module and validate its contract.
+
+    Inside an assembly project (an assembly.py above the model) the project root is on sys.path while the
+    module runs, and shared() works; the values it handed out end up in module.__print3d_shared__.
+    """
     path = Path(path)
     module_name = "print3d_model_" + re.sub(r"\W", "_", path.stem)
     spec = importlib.util.spec_from_file_location(module_name, path, loader=SourceFileLoader(module_name, str(path)))
     module = importlib.util.module_from_spec(spec)
+    root = print3d_shared.find_project_root(path)
+    saved_path = list(sys.path)
+    if root is not None:
+        sys.path.insert(0, str(root))
     try:
-        spec.loader.exec_module(module)
+        with print3d_shared.activate(root, shared_overrides):
+            try:
+                spec.loader.exec_module(module)
+            finally:
+                module.__print3d_shared__ = print3d_shared.requested()
     except SyntaxError as exc:
         raise RunError("load", f"SyntaxError: {exc.msg}", exc=exc, line=exc.lineno) from exc
     except (Exception, SystemExit) as exc:
         raise RunError("load", f"{type(exc).__name__}: {exc}", exc=exc) from exc
+    finally:
+        sys.path[:] = saved_path
 
     params = getattr(module, "PARAMETERS", None)
     if not isinstance(params, dict):
@@ -507,6 +522,7 @@ def run(
         "parameters": {},
         "overrides": {},
         "parts": [],
+        "shared": {},
         "files": {},
         "checks": None,
         "warnings": [],
@@ -524,6 +540,7 @@ def run(
 
         stage = "load"
         module = _timed(result, "load", stage_load, model_path)
+        result["shared"] = dict(getattr(module, "__print3d_shared__", {}))
 
         stage = "params"
         params = stage_params(module, raw, result)
