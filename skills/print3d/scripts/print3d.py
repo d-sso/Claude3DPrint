@@ -6,6 +6,8 @@
     print3d check <model.py> [--set key=value ...] [--check key=value ...] [--strict] [--profile NAME]
     print3d calibrate [--set key=value ...] [--profile NAME] [--out DIR]
     print3d profile show|set KEY=VALUE ...|reset [KEY ...] [--profile NAME]
+    print3d assemble <assembly.py> [--set key=value ...] [--level unit|layout|all] [--unit NAME] [--layout NAME]
+                [--strict] [--out DIR] [--profile NAME] [--no-sheets]
 """
 from __future__ import annotations
 
@@ -259,6 +261,18 @@ def build_parser():
                        help="coupon parameter, e.g. gauges=3.175,3.969,5.159 (measured gauge diameters)")
     p_cal.add_argument("--profile", help="printer profile name (default: config 'profile')")
     p_cal.add_argument("--out", type=Path, help="output folder (default: <parts_dir>/calibration/<profile>/out)")
+    p_asm = sub.add_parser("assemble", help="check an assembly: interfaces, overlaps and targets, with evidence sheets")
+    p_asm.add_argument("assembly", type=Path, help="the project's assembly.py")
+    p_asm.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE",
+                       help="a shared value (interfaces.py) or an assembly parameter")
+    p_asm.add_argument("--level", choices=("unit", "layout", "all"), default="all",
+                       help="check the unit types, the layouts, or both (default)")
+    p_asm.add_argument("--unit", help="check only this unit")
+    p_asm.add_argument("--layout", help="check only this layout")
+    p_asm.add_argument("--strict", action="store_true", help="exit with code 3 when any check fails")
+    p_asm.add_argument("--out", type=Path, help="output folder (default: <assembly dir>/out)")
+    p_asm.add_argument("--profile", help="printer profile name (default: config 'profile')")
+    p_asm.add_argument("--no-sheets", dest="sheets", action="store_false", help="skip the evidence sheets")
     p_prof = sub.add_parser("profile", help="show or edit the active printer profile's calibration overrides")
     prof_sub = p_prof.add_subparsers(dest="profile_command", required=True)
     p_show = prof_sub.add_parser("show", help="print the merged profile and where each value comes from")
@@ -312,6 +326,14 @@ def main(argv=None):
             )
         elif args.command == "calibrate":
             result, code = cmd_calibrate(args)
+        elif args.command == "assemble":
+            import assemble_model
+
+            result, code = assemble_model.assemble(
+                args.assembly, args.overrides, level=args.level, unit=args.unit, layout=args.layout,
+                out_dir=args.out, profile=resolve_profile(load_config(), args.profile), strict=args.strict,
+                sheets=args.sheets,
+            )
         else:
             result, code = cmd_profile(args)
     except UsageError as exc:

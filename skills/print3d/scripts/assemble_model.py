@@ -1,4 +1,5 @@
-"""print3d assemble: load an assembly.py, build and place its parts and hardware (the checks come on top of this).
+"""print3d assemble: load an assembly.py, build and place its parts and hardware, check every unit and layout,
+and write the result (out/assembly.result.json) and the evidence sheets (out/assembly/).
 
 build123d is imported lazily, as in run_model, so that loading and parameter errors stay fast.
 """
@@ -7,8 +8,10 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import importlib.util
+import json
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -467,3 +470,284 @@ def check_layout(layout, unit_items, builder=None, *, units) -> dict:
         "targets": [{**ac.check_target(t, placed), "instance": None} for t in layout.targets] + variant_targets,
         "skipped": skipped,
     }
+
+
+# --- the assemble command -----------------------------------------------------------------------------------------
+
+LEVELS = ("unit", "layout", "all")
+SHEET_DIR = "assembly"  # sheets go in out/assembly/<unit or layout>/<check>.png
+RESULT_FILE = "assembly.result.json"
+
+
+def _select(kind, declared, wanted):
+    """The declared objects to check: all of them, or the one named `wanted` (a usage error if unknown)."""
+    if wanted is None:
+        return list(declared.values())
+    if wanted not in declared:
+        raise RunError("usage", f"Unknown {kind} {wanted!r}; {kind}s: {', '.join(declared) or 'none'}")
+    return [declared[wanted]]
+
+
+def _levels(level, unit, layout):
+    """(check units, check layouts) for --level and --unit / --layout."""
+    if level not in LEVELS:
+        raise RunError("usage", f"Unknown level {level!r}; choose from {', '.join(LEVELS)}")
+    if unit is not None and level == "layout":
+        raise RunError("usage", "--unit cannot be combined with --level layout")
+    if layout is not None and level == "unit":
+        raise RunError("usage", "--layout cannot be combined with --level unit")
+    units = level in ("unit", "all") and not (layout is not None and unit is None)
+    layouts = level in ("layout", "all") and not (unit is not None and layout is None)
+    return units, layouts
+
+
+def check_unit(unit, items) -> dict:
+    """Check one unit: its interfaces, then the overlap sweep (the snap results decide intended pairs), then targets."""
+    import assembly_checks as ac
+
+    results = {iface.name: ac.check_interface(iface, items) for iface in unit.interfaces}
+    intended = ac.intended_overlaps(unit.interfaces, results)
+    return {
+        "name": unit.name,
+        "parts": [{"name": n, "model": i.model, "shared": dict(i.shared)}
+                  for n, i in items.items() if i.kind == "part"],
+        "interfaces": list(results.values()),
+        "overlaps": ac.overlap_sweep(items, intended),
+        "targets": [ac.check_target(t, items) for t in unit.targets],
+        "sheets": {},
+    }
+
+
+def _entries(group):
+    return group["interfaces"] + group["overlaps"] + group["targets"]
+
+
+def _passed(results):
+    return sum(r["status"] == "pass" for r in results), sum(r["status"] == "fail" for r in results)
+
+
+def _summary(groups):
+    ip, if_ = _passed([r for g in groups for r in g["interfaces"]])
+    tp, tf = _passed([r for g in groups for r in g["targets"]])
+    return {
+        "interfaces": {"pass": ip, "fail": if_, "skipped": sum(len(g.get("skipped", [])) for g in groups)},
+        "overlaps": sum(len(g["overlaps"]) for g in groups),
+        "targets": {"pass": tp, "fail": tf},
+    }
+
+
+def _slug(name):
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "check"
+
+
+class _Stems:
+    """Unique file stems within one folder (so an interface named "overview" can't overwrite the overview)."""
+
+    def __init__(self, reserved=()):
+        self.used = set(reserved)
+
+    def __call__(self, name):
+        stem, k = _slug(name), 2
+        while stem in self.used:
+            stem, k = f"{_slug(name)}-{k}", k + 1
+        self.used.add(stem)
+        return stem
+
+
+def _check_name(entry):
+    return entry.get("name") or f"overlap {entry['a']} / {entry['b']}"
+
+
+def _overview_lines(group, kind):
+    """Info lines for an overview sheet, and the failing entries (numbered markers on the views)."""
+    failed = [r for r in _entries(group) if r["status"] == "fail"]
+    ip, if_ = _passed(group["interfaces"])
+    tp, tf = _passed(group["targets"])
+    skipped = f", {len(group['skipped'])} skipped" if group.get("skipped") else ""
+    lines = [f"Status: {'fail' if failed else 'pass'}", f"Interfaces: {ip} pass, {if_} fail{skipped}",
+             f"Overlaps: {len(group['overlaps'])}", f"Targets: {tp} pass, {tf} fail"]
+    if kind == "layout":
+        lines.append(f"Instances: {group['instances']}; exact: {', '.join(group['exact']) or 'none'}")
+    if failed:
+        lines.append("Failures (numbered on the views):")
+        lines += [f" {i + 1} {_check_name(r)}: {r['message']}" for i, r in enumerate(failed)]
+    return lines, failed
+
+
+def _group_sheets(group, kind, items, folder, title, highlight, result):
+    """Write one unit's or layout's sheets; each failure becomes a warning, never an error."""
+    import assembly_sheets
+
+    label = f"{kind} {group['name']!r}"
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            scene = assembly_sheets.make_scene(items)
+    except Exception as exc:
+        result["warnings"].append(f"Sheets skipped for {label}: {type(exc).__name__}: {exc}")
+        return
+    stems = _Stems({"overview"})
+    for entry in group["interfaces"] + group["overlaps"]:
+        if not entry.get("planes"):
+            continue
+        check = _check_name(entry)
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                path = assembly_sheets.interface_sheet(f"{group['name']} / {check}", scene, entry,
+                                                       folder / f"{stems(check)}.png")
+            entry["evidence"].append(path)
+        except Exception as exc:
+            result["warnings"].append(f"Sheet failed for {label}, check {check!r}: {type(exc).__name__}: {exc}")
+    lines, failed = _overview_lines(group, kind)
+    markers = [(tuple(r["location"]), i + 1) for i, r in enumerate(failed)
+               if r.get("location") and None not in r["location"]]
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            group["sheets"]["overview"] = assembly_sheets.overview_sheet(
+                title, scene, folder / "overview.png", highlight, lines=lines, markers=markers)
+    except Exception as exc:
+        result["warnings"].append(f"Overview sheet failed for {label}: {type(exc).__name__}: {exc}")
+
+
+def stage_sheets(result, unit_items, layout_items, layouts, out):
+    """Render every evidence sheet into out/assembly/; as run's preview, a failure is only a warning."""
+    try:
+        import assembly_sheets  # noqa: F401
+    except ImportError as exc:  # e.g. pillow missing because setup.ps1 wasn't re-run after an update
+        result["warnings"].append(
+            f"Sheets skipped: the Python package {exc.name or str(exc)!r} is not installed. "
+            "Re-run skills/print3d/scripts/setup.ps1 to update the print3d environment."
+        )
+        return
+    folders = _Stems()
+    root = out / SHEET_DIR
+    for group in result["units"]:
+        _group_sheets(group, "unit", unit_items[group["name"]], root / folders(group["name"]),
+                      f"Unit {group['name']}", (), result)
+    for group in result["layouts"]:
+        layout = layouts[group["name"]]
+        exact = ", ".join(layout.exact) or "none"
+        highlight = tuple(layout.exact) + tuple(decl.name for decl in layout.items)
+        _group_sheets(group, "layout", layout_items[group["name"]], root / folders(group["name"]),
+                      f"Layout {group['name']}  ·  {group['instances']} instances, exact: {exact}", highlight, result)
+
+
+def _exit_code(result, strict):
+    if not result["ok"]:
+        return 2 if result["error"]["stage"] == "usage" else 1
+    return 3 if strict and result["status"] == "fail" else 0
+
+
+def _timed(result, name, fn, *args):
+    start = time.perf_counter()
+    value = fn(*args)
+    result["timings_s"][name] = run_model._r3(time.perf_counter() - start)
+    return value
+
+
+def _stage_load(path, set_pairs, result):
+    module, params, shared_overrides = load_assembly(path, set_pairs)
+    assembly = declare_assembly(module, params, shared_overrides)
+    raw = run_model.parse_overrides(set_pairs)
+    result["parameters"] = dict(params)
+    result["overrides"] = {**shared_overrides, **{k: params[k] for k in raw if k not in shared_overrides}}
+    result["warnings"] += [note for note in assembly.notes if note not in result["warnings"]]
+    return assembly, shared_overrides
+
+
+def _stage_build(assembly, builder, unit_list, layout_list, profile):
+    """Build the items of every unit that is checked or used by a checked layout, and place the layouts."""
+    needed = {u.name for u in unit_list} | {name for lay in layout_list for _, name, _ in lay.instances}
+    run_model.activate_profile(profile)
+    unit_items = {u.name: {decl.name: builder.item(decl) for decl in u.items}
+                  for u in assembly.units if u.name in needed}
+    layout_items = {lay.name: place_layout(lay, unit_items, builder) for lay in layout_list}
+    return unit_items, layout_items
+
+
+def _stage_check(assembly, builder, unit_items, unit_list, layout_list, result):
+    result["units"] = [check_unit(u, unit_items[u.name]) for u in unit_list]
+    result["layouts"] = [{**check_layout(lay, unit_items, builder, units=assembly.units), "sheets": {}}
+                         for lay in layout_list]
+    groups = result["units"] + result["layouts"]
+    for group in groups:
+        for entry in group["interfaces"] + group["overlaps"]:
+            entry.setdefault("evidence", [])
+    result["summary"] = _summary(groups)
+    result["status"] = "fail" if any(r["status"] == "fail" for g in groups for r in _entries(g)) else "pass"
+
+
+def assemble(path, set_pairs=(), level="all", unit=None, layout=None, out_dir=None, profile=None, strict=False,
+             sheets=True):
+    """Load, build, place and check an assembly; write out/assembly.result.json and the sheets. Returns (result, code).
+
+    level: "unit", "layout" or "all"; unit / layout: check only that one (--unit alone checks no layout, --layout
+    alone no unit; the units a layout uses are built either way). `profile` is a print3d_profile.load_profile()
+    dict (None: the default base profile). out_dir: default `out` next to assembly.py; sheets go in
+    out/assembly/<unit or layout>/<check>.png. Exit codes: 0 ok (also with failing checks), 1 error, 2 usage,
+    3 failing checks with strict.
+    """
+    path = Path(path).resolve()
+    result = {
+        "ok": False,
+        "model": path.as_posix(),
+        "parameters": {},
+        "overrides": {},
+        "shared": {},
+        "profile": None,
+        "status": None,
+        "summary": None,
+        "units": [],
+        "layouts": [],
+        "warnings": [],
+        "timings_s": {},
+        "error": None,
+    }
+    out = Path(out_dir).resolve() if out_dir else path.parent / "out"
+    stage, error_model = "usage", path
+    try:
+        check_units, check_layouts = _levels(level, unit, layout)
+        run_model.parse_overrides(set_pairs)
+        profile = run_model.activate_profile(profile)
+
+        stage = "load"
+        assembly, shared_overrides = _timed(result, "load", _stage_load, path, set_pairs, result)
+        stage = "usage"
+        unit_list = _select("unit", {u.name: u for u in assembly.units}, unit) if check_units else []
+        layout_list = _select("layout", {lay.name: lay for lay in assembly.layouts}, layout) if check_layouts else []
+
+        stage = "build"
+        builder = Builder(path.parent, shared_overrides, result)
+        result["shared"] = {**builder.interfaces, **shared_overrides}
+        try:
+            unit_items, layout_items = _timed(result, "build", _stage_build, assembly, builder, unit_list,
+                                              layout_list, profile)
+        except RunError as err:
+            error_model = Path(getattr(err, "model", path))  # a part's error: its traceback frames are the part's
+            raise
+
+        stage = "check"
+        _timed(result, "check", _stage_check, assembly, builder, unit_items, unit_list, layout_list, result)
+
+        if sheets:
+            stage = "sheets"
+            layouts = {lay.name: lay for lay in layout_list}
+            _timed(result, "sheets", stage_sheets, result, unit_items, layout_items, layouts, out)
+        result["ok"] = True
+    except RunError as err:
+        result["error"] = run_model.error_info(err, error_model)
+    except Exception as exc:
+        result["error"] = run_model.internal_error(stage, exc)
+
+    if stage != "usage" and profile is not None:
+        result["profile"] = run_model.profile_record(profile)
+    if not result["ok"]:
+        result["status"] = None
+
+    code = _exit_code(result, strict)
+    if code != 2:
+        try:
+            out.mkdir(parents=True, exist_ok=True)
+            (out / RESULT_FILE).write_text(json.dumps(result, indent=2), encoding="utf-8")
+        except OSError as exc:
+            result["warnings"].append(f"Could not write {RESULT_FILE}: {exc}")
+    return result, code
