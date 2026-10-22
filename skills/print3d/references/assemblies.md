@@ -52,24 +52,25 @@ Working examples: `tests/fixtures/assembly/boxlid/` (unit) and `row/` (layout) i
 ```python
 from build123d import Box
 from print3d_assembly import (Assembly, Bolted, Clear, Gap, Layout, Nut, NutPocket, Part, Passage, Position,
-                              Screw, Seat, Size, Snap, StandIn, Step, Unit, flip, place)
+                              Screw, Seat, Size, Snap, StandIn, Step, Unit, Washer, flip, place)
 
 items = [
     Part("base", "parts/base/base.py", color=(200, 200, 200)),
     Part("lid", "parts/lid/lid.py", at=place(z=23, rx=180), params={"holes": True}),   # modelled plate-down
     Screw("screw", "M3", "socket", 12.0, origin=(14, 0, 23), direction=(0, 0, 1)),     # origin = head's seating plane
     Nut("nut", "M3", "hex", origin=(14, 0, 11.9), direction=(0, 0, 1)),                # origin = nut's far face
+    Washer("washer", "M3", origin=(14, 0, 11.4), direction=(0, 0, 1)),               # origin = washer's far face
     StandIn("battery", Box(20, 10, 4), at=place(z=6, rz=90)),
 ]
 ```
 - `place(x, y, z, rx=, ry=, rz=)` is a `Location` (rotate rx, ry, rz in that order, then move); `flip()` rotates 180 degrees about X. Parts are modelled in print orientation, so a placement usually flips or rotates them.
 - `Part(name, model, at, params, color)`: `model` is relative to `assembly.py`; `params` override the part's PARAMETERS (variants); `"_part": "<name>"` picks one shape of a multi-part model. One model may be placed more than once.
-- Hardware is placed by its axis: `direction` is the screw's +Z, from tip towards head. `origin` is the head's seating plane for a `Screw`, and the face away from the head for a `Nut` or `Washer` (it runs from `origin` along `+direction`). Kinds: screw `socket`/`countersunk`/`button`; nut `hex`/`nyloc`; sizes M2 to M5. Threads aren't modelled (a screw is a cylinder at its nominal diameter).
+- Hardware is placed by its axis: `direction` is the screw's +Z, from tip towards head. `origin` is the head's seating plane for a `Screw`, and the face away from the head for a `Nut` or `Washer` (it runs from `origin` along `+direction`). Kinds: screw `socket`/`countersunk`/`button`; nut `hex`/`nyloc`. Sizes: M2, M2.5, M3, M4, M5 for socket screws, nuts and washers; countersunk and button heads exist for M3, M4, M5 only. Threads aren't modelled (a screw is a cylinder at its nominal diameter).
 - A `StandIn` is a straight build123d shape made in `assembly.py`. Ask the user for its real size.
 - `color` is `(r, g, b)` or `"#rrggbb"`; hardware defaults to grey.
 
 ### Interfaces
-Every interface takes `source=` (keyword) and an optional `limit=` (mm; default 0.1).
+Every interface takes `source=` (keyword) and an optional `limit=` (mm), but only `Bolted` (axis offset, nut axis offset), `NutPocket` (axis offset) and `Seat` (gap) use it, with default 0.1. `Snap`, `Passage` and `Clear` accept it and ignore it.
 ```python
 Bolted("bolt", "screw", [("lid", "clearance"), ("base", "thread")], source=SRC)  # roles: clearance, thread, insert
 Bolted("bolt", "screw", [("lid", "clearance"), ("base", "clearance")], nut="nut", protrusion=1.0, source=SRC)
@@ -77,10 +78,10 @@ NutPocket("nut-pocket", "nut", "base", source=SRC)
 Snap("snap", "lid", "base", point=(0, -11, 18), normal=(1, 0, 0), insert_dir=(0, 0, -1),
      engagement=(0.3, 0.8), clearance=(0.1, 0.2), travel=10.0, source=SRC)
 Seat("seat", "lid", "base", point=(0, -14, 20), normal=(0, 0, 1), source=SRC)
-Passage("strip", "strip", ["c1.block", "c2.block"], min_clearance=0.4, direction=(1, 0, 0), source=SRC)
+Passage("strip", "strip", ["c1.block", "c2.block"], min_clearance=0.4, direction=(1, 0, 0), source=SRC)  # layout-level: dotted names resolve only in a Layout
 Clear("battery-clear", "battery", "base", min_distance=1.0, source=SRC)
 ```
-- **Bolted**: for each listed part, finds the hole on the screw's axis and checks its offset (<= limit), its diameter (>= the profile's `screw_clearance`; a nut pocket must fit the nut), that the head seats (no gap, no overlap), that the shank overlaps nothing, and that the screw is long enough (`design-rules.md` "Fastener engagement"). The nut, if given, must sit on the shank. `protrusion=` overrides the rule's minimum.
+- **Bolted**: for each listed part, finds the hole on the screw's axis and checks its offset (<= limit) and its diameter by role (`clearance`: >= `screw_clearance(size)` - 0.1; `insert`: `insert_hole(size)` +/- 0.1; `thread`: diameter not checked, only engagement), that the head seats (no gap, no overlap), that the shank overlaps nothing, and that the screw is long enough (`design-rules.md` "Fastener engagement"). The nut, if given, must sit on the shank. Whether the nut fits its pocket is a separate `NutPocket` check. `protrusion=` overrides the rule's minimum.
 - **NutPocket**: the nut sits in the pocket without overlap, can't turn (pocket across-flats below the nut's across-corners), and is on its screw's axis.
 - **Snap**: measured in the section through `point` with `normal`; `insert_dir` is the direction the bump part moves to snap in and lies in the section plane. `engagement` and `clearance` are `(min, max)` in mm or `None`. Engagement = how far the bump reaches past the catch edge = bump height minus the per-side running clearance. A typical PLA+ skirt is 0.3 to 0.8 mm (`design-rules.md` "Snap engagement"). `fit="name"` reports a profile fit alongside the clearance.
 - **Seat**: faces of `a` and `b` near the plane (`point`, `normal`) touch. The gap is measured along `normal` through `point`.
@@ -106,11 +107,11 @@ Assembly([cell], [row], notes=[...])
 ```
 - Inside a layout, `"<instance>.<item>"` names an item of a unit instance; a bare name is a layout item. Item names contain no `.`.
 - **`exact`** lists the instances checked with full solids. It **must include every unit variant** (every instance with `overrides`) and **every distinct neighbour pair**. Propose it to the user with the checks.
-- Variants get their own unit interfaces checked. Layout interfaces that touch an instance outside `exact` are `skipped` (listed with a reason, not failed). Layout targets run on every instance.
+- Variants get their own unit interfaces checked. Layout interfaces are `skipped` (listed with a reason, not failed) only when they name no layout item and touch an instance outside `exact`. An interface that names a layout item (e.g. a strip `StandIn`) is always checked against all the parts it names. Layout targets run on every instance.
 - A layout `Passage` is the way to check a strip running through slots of neighbouring units.
 
 ## Running
-`print3d assemble <assembly.py> [--set k=v ...] [--level unit|layout|all] [--unit NAME] [--layout NAME] [--strict] [--out DIR] [--no-sheets]`.
+`print3d assemble <assembly.py> [--set k=v ...] [--level unit|layout|all] [--unit NAME] [--layout NAME] [--strict] [--out DIR] [--no-sheets] [--profile NAME]`. `--profile` picks the printer profile whose `screw_clearance` and `insert_hole` values the checks use.
 Exit codes: 0 ok (checks may still fail), 1 error, 2 usage, 3 failing checks under `--strict`.
 
 ## Reading the result

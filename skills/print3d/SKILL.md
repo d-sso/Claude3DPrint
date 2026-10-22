@@ -21,8 +21,8 @@ Commands:
 - `print3d check <model.py> [--set key=value ...] [--check key=value ...] [--strict]`: builds and checks without writing any files.
 - `print3d calibrate [--set gauges=...] [--profile NAME]`: builds the calibration coupon for the active printer profile and prints measuring instructions. `--set gauges=3.175,3.969,5.159` sets the measured gauge (drill-bit shank) diameters.
 - `print3d profile show|set KEY=VALUE ...|reset [KEY ...] [--profile NAME]`: shows the active profile, or records/removes calibrated values. Never hand-edit `config.toml`.
-- `print3d assemble <assembly.py> [--set key=value ...] [--level unit|layout|all] [--unit NAME] [--layout NAME] [--strict]`: checks how parts fit together (section 7).
-- `--profile NAME` on `run`/`check`/`calibrate`/`profile` uses another printer profile for that command. A new material or nozzle needs its own profile file and its own calibration.
+- `print3d assemble <assembly.py> [--set key=value ...] [--level unit|layout|all] [--unit NAME] [--layout NAME] [--strict] [--out DIR] [--no-sheets] [--profile NAME]`: checks how parts fit together (section 7).
+- `--profile NAME` on `run`/`check`/`calibrate`/`assemble`/`profile` uses another printer profile for that command. A new material or nozzle needs its own profile file and its own calibration.
 
 ## 1. Gather requirements
 Before modelling, make sure you know the following. Ask **one question at a time**, and only for what isn't already clear:

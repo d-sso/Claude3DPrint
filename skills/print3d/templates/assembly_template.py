@@ -6,7 +6,7 @@ usually rotates or flips them: place(z=..., rx=180) or flip().
 """
 from print3d_assembly import (
     Assembly, Bolted, Clear, Gap, Layout, Nut, NutPocket, Part, Passage, Position, Screw, Seat, Size, Snap,
-    StandIn, Step, Unit, flip, place,
+    StandIn, Step, Unit, Washer, flip, place,
 )
 from print3d_shared import shared  # noqa: F401  (shared values from interfaces.py: S = shared("wall", ...))
 
