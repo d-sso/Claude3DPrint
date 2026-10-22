@@ -351,3 +351,21 @@ def test_render_scene_overlap_is_red_and_coincident_faces_dont_speckle():
     (cx, cy), (ex, ey) = s.project([(0, 0, 5), (4, 0, 5)])
     assert tuple(pixels(s)[int(cy), int(cx)]) == render_model.OVERLAP_RGB and s.overlap[int(cy), int(cx)]
     assert tuple(pixels(s)[int(ey), int(ex)]) == tuple(round(v * render_model.SCENE_CUT_SHADE) for v in RED)
+
+
+def test_render_scene_pair_styles_and_thin_overlaps():
+    # two blocks interpenetrating by 0.2 mm, at 0.02 mm/px: the 10 px wide overlap is all red, not eroded away
+    a, b = box((4, 4, 4), (0, 0, 2)), box((4, 4, 4), (3.8, 0, 2))
+    sec = Section((1.9, 0, 2), (0, -1, 0))
+    r = render_model.render_scene([(a, RED), (b, BLUE)], section=sec, mm_per_px=0.02, center=(1.9, 0, 2))
+    red = color_mask(r, render_model.OVERLAP_RGB)
+    assert red.sum() >= 8 * 100 and red.sum() <= r.overlap.sum()  # edges may draw over a few
+    # a listed engaged pair is hatched with ENGAGED_RGB, never red; an unlisted pair isn't painted at all
+    styles = {frozenset((0, 1)): render_model.ENGAGED}
+    e = render_model.render_scene([(a, RED), (b, BLUE)], section=sec, mm_per_px=0.02, center=(1.9, 0, 2),
+                                  overlaps=styles)
+    assert not color_mask(e, render_model.OVERLAP_RGB).any() and not e.overlap.any()
+    assert color_mask(e, render_model.ENGAGED_RGB).sum() > 100 and e.engaged.any()
+    n = render_model.render_scene([(a, RED), (b, BLUE)], section=sec, mm_per_px=0.02, center=(1.9, 0, 2),
+                                  overlaps={})
+    assert not color_mask(n, render_model.OVERLAP_RGB).any() and not color_mask(n, render_model.ENGAGED_RGB).any()

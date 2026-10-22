@@ -650,8 +650,8 @@ def overlap_sweep(items, intended, pairs=None) -> list[dict]:
     """Every pair of items {name: PlacedItem} that overlaps, other than the intended pairs (see intended_overlaps).
 
     pairs: only these (a, b) name pairs are looked at (None: every pair of items, in their order).
-    Each entry: a, b, volume_mm3, location (centre of the overlap's bounding box), planes (through it, normals z
-    and x), status "fail", message.
+    Each entry: a, b, volume_mm3, location (centre of the overlap's bounding box), size (that box's x, y, z),
+    planes (through it, normals z and x), status "fail", message.
     """
     if pairs is None:
         names = list(items)
@@ -660,7 +660,7 @@ def overlap_sweep(items, intended, pairs=None) -> list[dict]:
     for a, b in pairs:
         if frozenset((a, b)) in intended:
             continue
-        volume, centre = ag.overlap(items[a].shape, items[b].shape)  # pairs whose boxes don't meet: 0 at once
+        volume, centre, size = ag.overlap_extent(items[a].shape, items[b].shape)  # boxes that don't meet: 0 at once
         if volume <= 0:
             continue
         point = [_num(v, 4) for v in centre]
@@ -669,6 +669,7 @@ def overlap_sweep(items, intended, pairs=None) -> list[dict]:
             "b": b,
             "volume_mm3": _num(volume),
             "location": point,
+            "size": [_num(v, 4) for v in size],
             "planes": [(point, [0.0, 0.0, 1.0]), (point, [1.0, 0.0, 0.0])],
             "status": "fail",
             "message": f"{a} overlaps {b} by {_fmt(volume)} mm^3",

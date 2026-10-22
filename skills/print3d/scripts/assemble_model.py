@@ -10,6 +10,7 @@ import dataclasses
 import importlib.util
 import json
 import re
+import shutil
 import sys
 import time
 from dataclasses import dataclass, field
@@ -526,11 +527,16 @@ def _passed(results):
     return sum(r["status"] == "pass" for r in results), sum(r["status"] == "fail" for r in results)
 
 
+def _skipped_interfaces(groups):
+    """Skipped interfaces only: a non-exact variant instance (type "instance") is listed in skipped, not counted."""
+    return sum(entry.get("type") != "instance" for g in groups for entry in g.get("skipped", []))
+
+
 def _summary(groups):
     ip, if_ = _passed([r for g in groups for r in g["interfaces"]])
     tp, tf = _passed([r for g in groups for r in g["targets"]])
     return {
-        "interfaces": {"pass": ip, "fail": if_, "skipped": sum(len(g.get("skipped", [])) for g in groups)},
+        "interfaces": {"pass": ip, "fail": if_, "skipped": _skipped_interfaces(groups)},
         "overlaps": sum(len(g["overlaps"]) for g in groups),
         "targets": {"pass": tp, "fail": tf},
     }
@@ -586,14 +592,19 @@ def _group_sheets(group, kind, items, folder, title, highlight, result):
         result["warnings"].append(f"Sheets skipped for {label}: {type(exc).__name__}: {exc}")
         return
     stems = _Stems({"overview"})
+    results = _entries(group)
+    faults, engaged = assembly_sheets.fault_pairs(results), assembly_sheets.engaged_pairs(results)
     for entry in group["interfaces"] + group["overlaps"]:
         if not entry.get("planes"):
             continue
         check = _check_name(entry)
+        names = set(entry.get("items") or (entry["a"], entry["b"]))
+        overlaps = [o for o in group["overlaps"] if {o["a"], o["b"]} <= names]  # an overlap entry: itself
         try:
             with contextlib.redirect_stdout(sys.stderr):
                 path = assembly_sheets.interface_sheet(f"{group['name']} / {check}", scene, entry,
-                                                       folder / f"{stems(check)}.png")
+                                                       folder / f"{stems(check)}.png", faults=faults,
+                                                       engaged=engaged, overlaps=overlaps)
             entry["evidence"].append(path)
         except Exception as exc:
             result["warnings"].append(f"Sheet failed for {label}, check {check!r}: {type(exc).__name__}: {exc}")
@@ -606,6 +617,17 @@ def _group_sheets(group, kind, items, folder, title, highlight, result):
                 title, scene, folder / "overview.png", highlight, lines=lines, markers=markers)
     except Exception as exc:
         result["warnings"].append(f"Overview sheet failed for {label}: {type(exc).__name__}: {exc}")
+
+
+def clear_sheets(out, result):
+    """Remove out/assembly/ so no sheet from an earlier run sits next to this result (a failure is a warning)."""
+    folder = out / SHEET_DIR
+    if folder.exists():
+        try:
+            shutil.rmtree(folder)
+        except OSError as exc:
+            result["warnings"].append(f"Could not remove the old sheets in {folder.as_posix()}: {exc}; "
+                                      "sheets there may be from an earlier run")
 
 
 def stage_sheets(result, unit_items, layout_items, layouts, out):
@@ -683,7 +705,8 @@ def assemble(path, set_pairs=(), level="all", unit=None, layout=None, out_dir=No
     level: "unit", "layout" or "all"; unit / layout: check only that one (--unit alone checks no layout, --layout
     alone no unit; the units a layout uses are built either way). `profile` is a print3d_profile.load_profile()
     dict (None: the default base profile). out_dir: default `out` next to assembly.py; sheets go in
-    out/assembly/<unit or layout>/<check>.png. Exit codes: 0 ok (also with failing checks), 1 error, 2 usage,
+    out/assembly/<unit or layout>/<check>.png; out/assembly/ is emptied first on every successful check run, also
+    with sheets=False, so it never holds sheets from an earlier run. Exit codes: 0 ok (also with failing checks), 1 error, 2 usage,
     3 failing checks with strict.
     """
     path = Path(path).resolve()
@@ -728,6 +751,7 @@ def assemble(path, set_pairs=(), level="all", unit=None, layout=None, out_dir=No
         stage = "check"
         _timed(result, "check", _stage_check, assembly, builder, unit_items, unit_list, layout_list, result)
 
+        clear_sheets(out, result)  # also with --no-sheets: no stale evidence next to this result
         if sheets:
             stage = "sheets"
             layouts = {lay.name: lay for lay in layout_list}

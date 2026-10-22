@@ -69,14 +69,20 @@ def _boxes_meet(a, b):
 
 def overlap(a, b):
     """The intersection volume of a and b and the centre of its bounding box, or (0.0, None) below OVERLAP_EPS."""
+    volume, centre, _ = overlap_extent(a, b)
+    return volume, centre
+
+
+def overlap_extent(a, b):
+    """As overlap(), plus the size (x, y, z) of the intersection's bounding box (None below OVERLAP_EPS)."""
     if not _boxes_meet(a, b):
-        return 0.0, None
+        return 0.0, None, None
     solids = [piece for piece in _pieces(a.intersect(b)) if piece.volume > 0]
     volume = sum(piece.volume for piece in solids)
     if volume < OVERLAP_EPS:
-        return 0.0, None
-    centre = Compound(solids).bounding_box().center()
-    return volume, tuple(centre)
+        return 0.0, None, None
+    box = Compound(solids).bounding_box()
+    return volume, tuple(box.center()), tuple(box.size)
 
 
 def min_distance(a, b):

@@ -121,3 +121,85 @@ def test_assemble_row_layout(capsys, tmp_path):
     assert Path(strip["evidence"][0]).parent == (tmp_path / "assembly" / "row").resolve()
     assert Path(layout["sheets"]["overview"]).is_file()
     assert data["summary"]["targets"] == {"pass": 2, "fail": 0}
+
+
+def _png(path):
+    import numpy as np
+    from PIL import Image
+
+    with Image.open(path) as image:
+        return np.asarray(image.convert("RGB"))
+
+
+def _has(pixels, rgb):
+    import numpy as np
+
+    return bool(np.all(pixels == np.array(rgb, dtype=np.uint8), axis=-1).any())
+
+
+def test_offset_hole_overlap_sheet_shows_red(capsys, tmp_path):
+    import render_model
+
+    project = copy_project(BOXLID, tmp_path)
+    path = project / "assembly.py"
+    old = "at=place(z=top, rx=180), color"
+    text = path.read_text(encoding="utf-8")
+    assert old in text
+    path.write_text(text.replace(old, 'at=place(z=top, rx=180), params={"hole_dx": 0.5}, color'), encoding="utf-8")
+    code, data = assemble(capsys, path)
+    assert code == 0, data["error"]
+    overlap = next(o for o in data["units"][0]["overlaps"] if {o["a"], o["b"]} == {"lid", "screw-left"})
+    assert _has(_png(overlap["evidence"][0]), render_model.OVERLAP_RGB)
+    bolt = next(r for r in data["units"][0]["interfaces"] if r["name"] == "bolt-left")
+    assert _has(_png(bolt["evidence"][0]), render_model.OVERLAP_RGB)
+
+
+THREAD_PROJECT = (
+    "from build123d import Align, Box, Cylinder\n"
+    "from print3d_assembly import Assembly, Bolted, Screw, StandIn, Unit\n"
+    "\n"
+    "MIN_Z = (Align.CENTER, Align.CENTER, Align.MIN)\n"
+    "\n"
+    "\n"
+    "def build_assembly(a):\n"
+    "    block = Box(20, 20, 10, align=MIN_Z) - Cylinder(1.25, 10, align=MIN_Z)  # a 2.5 mm pilot for M3\n"
+    "    items = [StandIn('block', block, color=(200, 200, 200)),\n"
+    "             Screw('screw', 'M3', 'socket', 8.0, origin=(0, 0, 10), direction=(0, 0, 1))]\n"
+    "    joint = Bolted('j', 'screw', [('block', 'thread')], source='test')\n"
+    "    return Assembly([Unit('joint', items, [joint])])\n"
+)
+
+
+def test_thread_engagement_sheet_is_not_fault_red(capsys, tmp_path):
+    import render_model
+
+    project = tmp_path / "thread"
+    project.mkdir()
+    (project / "assembly.py").write_text(THREAD_PROJECT, encoding="utf-8")
+    code, data = assemble(capsys, project / "assembly.py")
+    assert code == 0, data["error"]
+    assert data["status"] == "pass" and data["units"][0]["overlaps"] == []
+    pixels = _png(data["units"][0]["interfaces"][0]["evidence"][0])
+    assert not _has(pixels, render_model.OVERLAP_RGB)
+    assert _has(pixels, render_model.ENGAGED_RGB)  # the hatch, and its legend swatch
+
+
+def test_stale_sheets_are_removed(capsys, tmp_path):
+    out = tmp_path / "out"
+    stale = out / "assembly" / "box" / "old-check.png"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"old")
+    code, data = assemble(capsys, BOXLID / "assembly.py", "--out", out, "--no-sheets")
+    assert code == 0 and not (out / "assembly").exists()
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"old")
+    code, data = assemble(capsys, ROW / "assembly.py", "--out", out, "--level", "unit")
+    assert code == 0 and not stale.exists() and (out / "assembly" / "cell" / "overview.png").is_file()
+
+
+def test_summary_counts_interface_skips_only():
+    import assemble_model
+
+    group = {"interfaces": [], "overlaps": [], "targets": [],
+             "skipped": [{"name": "clear-34", "type": "clear"}, {"name": "c3", "type": "instance"}]}
+    assert assemble_model._summary([group])["interfaces"]["skipped"] == 1
