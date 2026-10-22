@@ -118,3 +118,66 @@ def test_layout_item_name_without_dot():
     # "c1.block" would collide with instance c1's item block in place_layout
     with pytest.raises(ValueError, match="must not contain '.'"):
         pa.Layout("row", [("c1", "u", pa.place())], items=[pa.StandIn("c1.block", Box(1, 1, 1))])
+
+
+# --- exact variants: an overridden exact instance gets its own unit's checks ------------------------------------
+
+BOXLID = FIXTURES / "assembly" / "boxlid" / "assembly.py"
+
+
+@pytest.fixture(scope="module")
+def boxlid():
+    module, params, shared_overrides = assemble_model.load_assembly(BOXLID)
+    assembly = assemble_model.declare_assembly(module, params, shared_overrides)
+    result = {"warnings": []}
+    builder = assemble_model.Builder(BOXLID.parent, shared_overrides, result)
+    items = assemble_model.build_items(assembly, BOXLID.parent, shared_overrides, result, builder=builder)
+    return assembly, items, builder
+
+
+def check_boxes(boxlid, lid_params):
+    """Two boxes side by side, both exact; b2's lid is a variant."""
+    assembly, items, builder = boxlid
+    layout = pa.Layout("pair", [("b1", "box", pa.place()), ("b2", "box", pa.place(x=60))], exact=("b1", "b2"),
+                       overrides={"b2": {"lid": lid_params}})
+    return assemble_model.check_layout(layout, items, builder, units=assembly.units)
+
+
+def test_exact_variant_unbroken_passes(boxlid):
+    result = check_boxes(boxlid, {"hole_dx": 0.0})
+    unit = boxlid[0].units[0]
+    assert sorted(r["name"] for r in result["interfaces"]) == sorted(f"b2/{i.name}" for i in unit.interfaces)
+    assert sorted(r["name"] for r in result["targets"]) == sorted(f"b2/{t.name}" for t in unit.targets)
+    for r in result["interfaces"] + result["targets"]:
+        assert r["status"] == "pass", (r["name"], r["message"])
+        assert r["instance"] == "b2"
+    bolt = by_name(result["interfaces"], "b2/bolt-left")
+    assert bolt["items"] == ["b2.screw-left", "b2.lid", "b2.base", "b2.nut-left"]
+    # measured in the unit frame, reported in the layout's: b2 sits at x = 60, the left bolt at unit x = -14
+    assert bolt["location"][0] == pytest.approx(46.0, abs=0.01)
+    assert result["overlaps"] == [] and result["skipped"] == []
+
+
+def test_exact_variant_interfaces_checked(boxlid):
+    # the variant's screw holes are 0.5 mm off the screw axis: the variant's own bolted joints must fail on it
+    result = check_boxes(boxlid, {"hole_dx": 0.5})
+    for side in ("left", "right"):
+        bolt = by_name(result["interfaces"], f"b2/bolt-{side}")
+        assert bolt["status"] == "fail" and "lid" in bolt["message"]
+        assert bolt["measured"]["offset"]["lid"] == pytest.approx(0.5, abs=0.05)
+    assert any({o["a"], o["b"]} == {"b2.screw-left", "b2.lid"} for o in result["overlaps"])
+
+
+def test_exact_variant_snap_not_overlap(boxlid):
+    # a taller bump interferes with the groove: the snap checks report it, the sweep treats it as intended
+    result = check_boxes(boxlid, {"bump_h": 0.8})
+    for side in ("front", "back"):
+        snap = by_name(result["interfaces"], f"b2/snap-{side}")
+        assert snap["status"] == "fail" and snap["measured"]["overlap_mm3"] > 0
+    assert result["overlaps"] == []
+
+
+def test_units_required(row):
+    assembly, items, builder = row
+    with pytest.raises(TypeError):
+        assemble_model.check_layout(assembly.layouts[0], items, builder)

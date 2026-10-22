@@ -352,39 +352,78 @@ def _sweep_pairs(placed, layout):
     return pairs
 
 
-def _unit_intended(layout, units):
-    """The unit-level intended overlaps (screws in their threads, ...) inside each overridden exact instance."""
-    import assembly_checks as ac
+def _in_instance(result, inst, loc):
+    """A unit-level result measured in instance `inst`'s unit frame, reported in the layout frame.
 
-    pairs = set()
-    for inst in layout.exact:
-        unit = units.get(layout.unit_of(inst))
-        if inst in layout.overrides and unit is not None:
-            pairs |= {frozenset(f"{inst}.{n}" for n in pair) for pair in ac.intended_overlaps(unit.interfaces)}
-    return pairs
+    Named "<inst>/<name>", items "<inst>.<item>"; location and planes moved by the instance Location `loc`.
+    """
+    from build123d import Location, Vector
+
+    def point(p):
+        return None if p is None or None in p else [round(v, 4) + 0.0 for v in (loc * Location(Vector(*p))).position]
+
+    def normal(p, n):
+        if point(p) is None or n is None or None in n:
+            return n
+        tip = (loc * Location(Vector(*p) + Vector(*n))).position - (loc * Location(Vector(*p))).position
+        return [round(v, 6) + 0.0 for v in tip]
+
+    moved = {**result, "name": f"{inst}/{result['name']}", "instance": inst,
+             "items": [f"{inst}.{n}" for n in result["items"]]}
+    if "location" in result:
+        moved["location"] = point(result["location"])
+    if "planes" in result:
+        moved["planes"] = [(point(p), normal(p, n)) for p, n in result["planes"]]
+    return moved
 
 
-def check_layout(layout, unit_items, builder=None, *, units=None) -> dict:
-    """Check one layout: what happens between its unit instances. Returns a JSON-ready dict.
+def _check_variants(layout, unit_items, units, builder):
+    """Check each exact instance with overrides (a unit variant) against its own unit's interfaces and targets.
 
-    name, instances (the count), exact (the instance names checked with full solids), interfaces, overlaps,
-    targets, skipped.
-    - Interfaces are checked when every item they name belongs to an exact instance, or when they name a layout
-      item (a layout item is always checked exactly against the parts it names, exact or not). The others go to
-      `skipped` with a reason; they don't fail, but aren't passed either. An instance with overrides outside the
-      exact subset is listed there too, since its variant's own overlaps and joints aren't checked.
-    - Overlap sweep: between items of different exact instances, inside exact instances with overrides, and
-      each layout item against every other item (see _sweep_pairs). Pairs inside an unchanged instance are the
-      unit level's.
-    - Targets: evaluated on every instance (distances and probes are cheap).
-    units: {name: Unit} or a list of Units; gives the intended overlaps inside overridden exact instances.
-    Unit-level interfaces aren't repeated per instance; the unit level checks them once.
+    The unit level checks only the unit as declared, so a variant's joints are checked here, once per instance.
+    They are measured in the unit frame (where the unit's points and origins are declared), on the unit's items
+    with the overridden parts rebuilt, and reported in the layout frame. Returns (interface results, target
+    results, intended overlap pairs) with names "<inst>/<name>" and item names "<inst>.<item>"; measured dicts
+    keep the unit's bare item names.
     """
     import assembly_checks as ac
 
-    if units is None:
-        units = {}
-    elif not isinstance(units, dict):
+    interfaces, targets, intended = [], [], set()
+    for inst, unit_name, loc in layout.instances:
+        if inst not in layout.exact or inst not in layout.overrides:
+            continue
+        unit, variants = units[unit_name], layout.overrides[inst]
+        items = dict(unit_items[unit_name])
+        for name, params in variants.items():
+            decl = items[name].decl
+            items[name] = builder.item(dataclasses.replace(decl, params={**decl.params, **params}))
+        results = {iface.name: ac.check_interface(iface, items) for iface in unit.interfaces}
+        interfaces += [_in_instance(r, inst, loc) for r in results.values()]
+        targets += [_in_instance(ac.check_target(t, items), inst, loc) for t in unit.targets]
+        intended |= {frozenset(f"{inst}.{n}" for n in pair) for pair in ac.intended_overlaps(unit.interfaces, results)}
+    return interfaces, targets, intended
+
+
+def check_layout(layout, unit_items, builder=None, *, units) -> dict:
+    """Check one layout: what happens between its unit instances. Returns a JSON-ready dict.
+
+    name, instances (the count), exact (the instance names checked with full solids), interfaces, overlaps,
+    targets, skipped. Every interface and target result has an `instance` key: None for the layout's own.
+    - Layout interfaces are checked when every item they name belongs to an exact instance, or when they name a
+      layout item (a layout item is always checked exactly against the parts it names, exact or not). The others
+      go to `skipped` with a reason; they don't fail, but aren't passed either.
+    - Variants: an exact instance with overrides also gets its unit's own interfaces and targets checked (as
+      "<inst>/<name>"), since the unit level checks only the unit as declared. An instance with overrides outside
+      the exact subset is listed in `skipped`.
+    - Overlap sweep: between items of different exact instances, inside exact instances with overrides, and
+      each layout item against every other item (see _sweep_pairs). Pairs inside an unchanged instance are the
+      unit level's.
+    - Layout targets: evaluated on every instance (distances and probes are cheap).
+    units: {name: Unit} or a list of Units, the assembly's (required: a variant's checks come from its unit).
+    """
+    import assembly_checks as ac
+
+    if not isinstance(units, dict):
         units = {u.name: u for u in units}
     placed = place_layout(layout, unit_items, builder)
     layout_items = {decl.name for decl in layout.items}
@@ -404,7 +443,7 @@ def check_layout(layout, unit_items, builder=None, *, units=None) -> dict:
                           f"add {', '.join(missing)} to exact to check it",
             })
             continue
-        results[iface.name] = ac.check_interface(iface, placed)
+        results[iface.name] = {**ac.check_interface(iface, placed), "instance": None}
 
     for inst in layout.overrides:
         if inst not in exact:
@@ -413,16 +452,18 @@ def check_layout(layout, unit_items, builder=None, *, units=None) -> dict:
                 "type": "instance",
                 "items": sorted(n for n in placed if _instance_of(n) == inst),
                 "reason": f"{inst} has overrides (a variant of unit {layout.unit_of(inst)!r}) but isn't in the exact "
-                          "subset: its overlaps and joints with neighbours aren't checked; add it to exact",
+                          "subset: the variant's own interfaces, targets and overlaps, and its overlaps with "
+                          "neighbours, aren't checked; add it to exact to check them",
             })
 
-    intended = ac.intended_overlaps(layout.interfaces, results) | _unit_intended(layout, units)
+    variant_ifaces, variant_targets, variant_intended = _check_variants(layout, unit_items, units, builder)
+    intended = ac.intended_overlaps(layout.interfaces, results) | variant_intended
     return {
         "name": layout.name,
         "instances": len(layout.instances),
         "exact": list(layout.exact),
-        "interfaces": list(results.values()),
+        "interfaces": list(results.values()) + variant_ifaces,
         "overlaps": ac.overlap_sweep(placed, intended, _sweep_pairs(placed, layout)),
-        "targets": [ac.check_target(target, placed) for target in layout.targets],
+        "targets": [{**ac.check_target(t, placed), "instance": None} for t in layout.targets] + variant_targets,
         "skipped": skipped,
     }
