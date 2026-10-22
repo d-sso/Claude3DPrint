@@ -337,3 +337,61 @@ def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0
     offsets, diameters, free_radii = zip(*measured)
     depth_span = (holes[0][0], holes[-1][1])
     return HoleProbe(True, max(offsets), min(diameters), min(free_radii), depth_span, len(measured), "", excluded)
+
+
+@dataclass
+class PocketSection:
+    found: bool
+    offset: float  # distance in the section plane from the point to the pocket's centre
+    min_width: float  # smallest width of the pocket outline (its convex hull's narrowest caliper)
+    closed: bool  # the pocket is an inner wire of the section; otherwise it opens out past `radius`
+    reason: str = ""
+
+
+def _min_width(points):
+    hull = points[ConvexHull(points).vertices]
+    best = math.inf
+    for a, b in zip(hull, np.roll(hull, -1, axis=0)):
+        edge = b - a
+        normal = np.array([-edge[1], edge[0]]) / np.hypot(*edge)
+        best = min(best, float(np.abs((hull - a) @ normal).max()))
+    return best
+
+
+def pocket_section(shape, point, normal, radius) -> PocketSection:
+    """The opening of shape's section through point (plane normal `normal`) that point lies in, e.g. a nut pocket.
+
+    A closed pocket is the inner wire around point: its centre is the wire's centroid. An open pocket (a side-loaded
+    nut trap) is the free region around point within 2 x radius: its centre is its largest inscribed circle's
+    (across the slot; along it, the circle nearest point), and the clipped outline counts towards its width.
+    """
+    local = Plane(origin=point, z_dir=normal).to_local_coords(shape)
+    faces = [face for piece in _pieces(local.intersect(Plane.XY)) for face in piece.faces()]
+    if not faces:
+        return PocketSection(False, math.nan, math.nan, False, "no material in the section")
+    origin = Vector(0, 0, 0)
+    for wire in (wire for face in faces for wire in face.inner_wires()):
+        pocket = Face(wire)
+        if pocket.is_inside(origin):
+            outline = np.concatenate([_discretise(edge) for edge in wire.edges()])
+            centre = pocket.center()
+            return PocketSection(True, float(math.hypot(centre.X, centre.Y)), _min_width(outline), True)
+    region_r = 2.0 * radius
+    region = Face(Wire.make_circle(region_r)).cut(*faces)
+    free = [face for face in region.faces() if face.is_inside(origin)]
+    if not free:
+        return PocketSection(False, math.nan, math.nan, False, "the point is inside material")
+    walls, segments, outline = [], [], []
+    for edge in free[0].edges():
+        points = _discretise(edge)
+        outline.append(points)
+        segments.append(np.stack([points[:-1], points[1:]], axis=1))
+        if np.abs(np.hypot(points[:, 0], points[:, 1]) - region_r).max() > EDGE_MATCH:
+            walls.append(points)
+    if not walls:
+        return PocketSection(False, math.nan, math.nan, False, f"no pocket wall within {region_r:g} mm")
+    walls = np.unique(np.concatenate(walls).round(9), axis=0)
+    circle = _largest_inscribed(walls, np.concatenate(segments), True)
+    if circle is None:
+        return PocketSection(False, math.nan, math.nan, False, "the walls don't enclose the point")
+    return PocketSection(True, float(np.hypot(*circle[0])), _min_width(np.concatenate(outline)), False)
