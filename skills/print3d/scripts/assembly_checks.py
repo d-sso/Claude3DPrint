@@ -11,6 +11,14 @@ the head is at t > 0 and the shank runs down to t = -length.
 Bolted holes are looked for only within the screw's extent (t from the tip to 0): material beyond the tip (a blind
 hole's floor, a part further down the axis) neither blocks the screw nor counts as its hole. A thread or insert
 part's hole must start at least ENGAGE_PITCHES x pitch before the tip, and a nut must sit on the shank.
+
+Snaps are measured in 2D, in the snap plane's own frame: u across (perpendicular to insert_dir in the plane), v along
+the pull-out direction (-insert_dir), both from the declared point. Only material within SNAP_WINDOW of the point
+counts, so the other snaps of the same parts don't. The bump region is the band of v where the bump part's section
+meets the catch's while it is pulled out; the running clearance is measured within CLEAR_MARGIN beside that band.
+
+overlap_sweep(items, intended) reports every overlapping pair not in `intended` (see intended_overlaps), and
+check_target(target, items) measures one intent target; a target without a value fails with "no target:".
 """
 from __future__ import annotations
 
@@ -18,17 +26,23 @@ import math
 import re
 
 import numpy as np
-from build123d import Plane, Solid
+from build123d import Box, Compound, Location, Plane, Pos, Solid
 
 import assembly_geometry as ag
 import hardware
 import print3d_profile
-from print3d_assembly import Bolted, NutPocket
+from print3d_assembly import Bolted, Clear, Gap, NutPocket, Passage, Position, Seat, Size, Snap, Step
 
 HEAD_RAYS = 12  # rays round the axis that find the surface under a head
 FLUSH_REACH = 0.5  # mm, a countersunk head's rim surface is probed this far outside the head
 PARALLEL_TOL = 1.0  # degrees, a nut axis within this of the screw axis counts as parallel
 ENGAGE_PITCHES = 2.0  # a thread or insert part's hole must reach at least this many pitches past its start
+SNAP_STEP = 0.05  # mm, the bump part is pulled out of its catch in steps this long
+SNAP_WINDOW = 3.0  # mm, snap sections count within this of the point (across, and along beyond the travel)
+CLEAR_MARGIN = 1.0  # mm, a snap's running clearance is measured within this beside the bump band
+SEAT_SLAB = 2.0  # mm, a seat's overlap is measured in a slab this thick about its plane
+SEAT_REACH = 5.0  # mm, ... within this of its point in the plane, and its surfaces this far along the normal
+MIN_AREA = 1e-6  # mm^2, smaller section pieces are touching edges, not overlaps
 
 
 def _num(value, digits=3):
@@ -70,11 +84,9 @@ def _sorted_failures(failures):
 
 def check_interface(iface, items) -> dict:
     """Check one declared interface on the placed items {name: PlacedItem}."""
-    checks = {Bolted: _check_bolted, NutPocket: _check_nut_pocket}
-    check = checks.get(type(iface))
-    if check is None:
-        raise NotImplementedError(f"no check for {type(iface).__name__} interfaces yet")
-    return check(iface, items)
+    checks = {Bolted: _check_bolted, NutPocket: _check_nut_pocket, Snap: _check_snap, Seat: _check_seat,
+              Passage: _check_passage, Clear: _check_clear}
+    return checks[type(iface)](iface, items)
 
 
 # --- bolted -------------------------------------------------------------------------------------------------------
@@ -355,3 +367,349 @@ def _check_nut_pocket(iface, items):
     passed = f"{decl.size} {decl.kind} nut in {iface.part}: no overlap, can't turn, on the pocket centre"
     return _result(iface, [iface.nut, iface.part], _sorted_failures(failures), measured, expected, mid, planes,
                    passed)
+
+
+
+# --- snap ---------------------------------------------------------------------------------------------------------
+
+
+def _rect(u0, u1, v0, v1, depth=1.0):
+    """A box over u0..u1 x v0..v1 in a plane's local frame, `depth` thick about the plane."""
+    return Pos((u0 + u1) / 2, (v0 + v1) / 2, 0) * Box(u1 - u0, v1 - v0, depth)
+
+
+def _faces(pieces):
+    return [face for piece in pieces for face in piece.faces() if face.area > MIN_AREA]
+
+
+def _clip(faces, region):
+    """The parts of these faces inside region (a solid, or a coplanar face)."""
+    return _faces(p for face in faces if ag._boxes_meet(face, region) for p in ag._pieces(face.intersect(region)))
+
+
+def _snap_frame(iface):
+    """The snap plane's frame: x across (perpendicular to insert_dir), y the pull-out direction, z the normal."""
+    pull = -np.array(iface.insert_dir)
+    across = np.cross(pull, np.array(iface.normal))
+    return Plane(origin=iface.point, x_dir=tuple(across), z_dir=iface.normal)
+
+
+def _pull_out(bump, catch, travel):
+    """Pull the bump faces out along +v in SNAP_STEPs over travel: the largest overlap width across with the catch
+    faces, and the v band (in the assembled position) where they met, or None when they never meet."""
+    top = max(face.bounding_box().max.Y for face in catch)
+    width, band = 0.0, None
+    for k in range(int(round(travel / SNAP_STEP)) + 1):
+        s = k * SNAP_STEP
+        moved = [face.moved(Location((0, s, 0))) for face in bump]
+        if min(face.bounding_box().min.Y for face in moved) > top:
+            break  # the bump is past the whole catch
+        for piece in (p for face in moved for c in catch for p in _clip([face], c)):
+            box = piece.bounding_box()
+            width = max(width, box.size.X)
+            lo, hi = box.min.Y - s, box.max.Y - s
+            band = (lo, hi) if band is None else (min(band[0], lo), max(band[1], hi))
+    return width, band
+
+
+def _running_clearance(bump, catch, band):
+    """The smallest distance between bump and catch faces within CLEAR_MARGIN beside the band, or None."""
+    lo, hi = band
+    best = None
+    for region in (_rect(-SNAP_WINDOW, SNAP_WINDOW, lo - CLEAR_MARGIN, lo),
+                   _rect(-SNAP_WINDOW, SNAP_WINDOW, hi, hi + CLEAR_MARGIN)):
+        for fa in _clip(bump, region):
+            for fb in _clip(catch, region):
+                d = fa.distance_to(fb)
+                best = d if best is None else min(best, d)
+    return best
+
+
+def _bump_overlap(bump, catch, frame, band):
+    """The volume of the two parts' assembled overlap that lies in this snap's bump region."""
+    lo, hi = band
+    reach = bump.bounding_box().diagonal + catch.bounding_box().diagonal
+    region = _rect(-SNAP_WINDOW, SNAP_WINDOW, lo - CLEAR_MARGIN, hi + CLEAR_MARGIN, depth=2 * reach)
+    shared = [p for p in ag._pieces(bump.intersect(catch)) if p.volume > 0]
+    if not shared:
+        return 0.0
+    inside = ag._pieces(Compound(shared).intersect(region.moved(Location(frame))))
+    return sum(p.volume for p in inside if p.volume > 0)
+
+
+def _range_failure(what, value, bounds):
+    if bounds is not None and not bounds[0] <= value <= bounds[1]:
+        return f"{what} {_fmt(value)} mm, expected {_fmt(bounds[0])} to {_fmt(bounds[1])}"
+    return None
+
+
+def _check_snap(iface, items):
+    bump, catch = items[iface.bump], items[iface.catch]
+    frame = _snap_frame(iface)
+    sections = {}
+    for name, item, v_hi in ((iface.bump, bump, SNAP_WINDOW), (iface.catch, catch, iface.travel + SNAP_WINDOW)):
+        faces = [frame.to_local_coords(face) for face in ag.section_faces(item.shape, iface.point, iface.normal)]
+        sections[name] = _clip(faces, _rect(-SNAP_WINDOW, SNAP_WINDOW, -SNAP_WINDOW, v_hi))
+    failures = [
+        f"not found: no section of {name} within {_fmt(SNAP_WINDOW)} mm of the snap point"
+        for name, faces in sections.items() if not faces
+    ]
+    fit = None if iface.fit is None else _num(print3d_profile.fit(iface.fit) / 2)
+    expected = {"engagement": list(iface.engagement) if iface.engagement else None, "engagement_above": 0.0,
+                "clearance": list(iface.clearance) if iface.clearance else None, "fit_per_side": fit,
+                "overlap_max": ag.OVERLAP_EPS}
+    volume = ag.overlap(bump.shape, catch.shape)[0]
+    measured = {"engagement": None, "clearance": None, "overlap_mm3": _num(volume), "bump_overlap_mm3": 0.0,
+                "bump_band": None}
+    if volume > 0:
+        failures.append(f"{iface.bump} overlaps {iface.catch} by {_fmt(volume)} mm^3")
+    if all(sections.values()):
+        width, band = _pull_out(sections[iface.bump], sections[iface.catch], iface.travel)
+        measured["engagement"] = _num(width)
+        measured["bump_band"] = None if band is None else [_num(band[0]), _num(band[1])]
+        if width <= 0:
+            failures.append(
+                f"not found: no engagement: {iface.bump}'s section never meets {iface.catch}'s within "
+                f"{_fmt(iface.travel)} mm of pulling out"
+            )
+        else:
+            failures.append(_range_failure("engagement", width, iface.engagement))
+        clearance = _running_clearance(sections[iface.bump], sections[iface.catch], band or (0.0, 0.0))
+        measured["clearance"] = _num(clearance)
+        if clearance is None:
+            failures.append(f"not found: no running surfaces of {iface.bump} and {iface.catch} beside the bump")
+        else:
+            failures.append(_range_failure("clearance", clearance, iface.clearance))
+        if volume > 0 and band is not None:
+            measured["bump_overlap_mm3"] = _num(_bump_overlap(bump.shape, catch.shape, frame, band))
+    failures = [f for f in failures if f]
+    passed = (f"{iface.bump} snaps into {iface.catch}: engagement {_fmt(measured['engagement'] or 0)} mm, "
+              f"clearance {_fmt(measured['clearance'] or 0)} mm")
+    if fit is not None:
+        passed += f" (fits.{iface.fit} / 2 = {_fmt(fit)})"
+    return _result(iface, [iface.bump, iface.catch], _sorted_failures(failures), measured, expected, iface.point,
+                   [(iface.point, iface.normal)], passed)
+
+
+# --- seat, passage, clear -----------------------------------------------------------------------------------------
+
+
+def _check_seat(iface, items):
+    """The gap is measured along the normal through the point: each part's surface crossing nearest the point.
+    (The smallest distance in the slab would find other surfaces beside the seat, e.g. a skirt's running clearance,
+    and miss a lifted seat.) The overlap is measured in the slab, near the point."""
+    limit = iface.limit or ag.CONTACT_LIMIT
+    failures, nearest = [], {}
+    for name in (iface.a, iface.b):
+        hits = [t for t in ag._line_hits(items[name].shape, iface.point, iface.normal) if abs(t) <= SEAT_REACH]
+        nearest[name] = min(hits, key=abs) if hits else None
+        if not hits:
+            failures.append(
+                f"not found: no surface of {name} within {_fmt(SEAT_REACH)} mm of the seat point along its normal"
+            )
+    region = _rect(-SEAT_REACH, SEAT_REACH, -SEAT_REACH, SEAT_REACH, depth=SEAT_SLAB)
+    region = region.moved(Location(Plane(origin=iface.point, z_dir=iface.normal)))
+    near = [[p for p in ag._pieces(items[name].shape.intersect(region)) if p.volume > 0] for name in (iface.a, iface.b)]
+    volume = ag.overlap(Compound(near[0]), Compound(near[1]))[0] if all(near) else 0.0
+    measured = {"gap": None, "overlap_mm3": _num(volume)}
+    if volume > 0:
+        failures.append(f"{iface.a} overlaps {iface.b} at the seat by {_fmt(volume)} mm^3")
+    if None not in nearest.values():
+        gap = 0.0 if volume > 0 else abs(nearest[iface.a] - nearest[iface.b])
+        measured["gap"] = _num(gap)
+        if gap > limit:
+            failures.append(f"{iface.a} is {_fmt(gap)} mm from {iface.b} at the seat (limit {_fmt(limit)})")
+    expected = {"gap_max": limit, "overlap_max": ag.OVERLAP_EPS}
+    passed = f"{iface.a} seats on {iface.b}"
+    return _result(iface, [iface.a, iface.b], _sorted_failures(failures), measured, expected, iface.point,
+                   [(iface.point, iface.normal)], passed)
+
+
+def _longest_axis(box):
+    axis = [0.0, 0.0, 0.0]
+    axis[int(np.argmax(tuple(box.size)))] = 1.0
+    return tuple(axis)
+
+
+def _check_passage(iface, items):
+    item = items[iface.item]
+    failures = []
+    measured = {"overlap_mm3": {}, "clearance": {}}
+    for name in iface.through:
+        part = items[name].shape
+        if not ag._boxes_meet(item.shape, part):
+            failures.append(f"not found: {iface.item} doesn't reach {name} (their bounding boxes don't meet)")
+            measured["overlap_mm3"][name] = measured["clearance"][name] = None
+            continue
+        volume = ag.overlap(item.shape, part)[0]
+        clearance = 0.0 if volume > 0 else item.shape.distance_to(part)
+        measured["overlap_mm3"][name], measured["clearance"][name] = _num(volume), _num(clearance)
+        if volume > 0:
+            failures.append(f"{iface.item} overlaps {name} by {_fmt(volume)} mm^3: {name} blocks it")
+        elif clearance < iface.min_clearance:
+            failures.append(f"{name}: clearance {_fmt(clearance)} mm, needs at least {_fmt(iface.min_clearance)}")
+    box = item.shape.bounding_box()
+    centre = tuple(box.center())
+    expected = {"overlap_max": ag.OVERLAP_EPS, "clearance_min": iface.min_clearance}
+    passed = f"{iface.item} passes through {', '.join(iface.through)} with at least {_fmt(iface.min_clearance)} mm"
+    return _result(iface, [iface.item, *iface.through], _sorted_failures(failures), measured, expected, centre,
+                   [(centre, _longest_axis(box))], passed)
+
+
+def _closest(a, b):
+    """(distance, midpoint, direction a -> b) between two shapes; an overlap gives 0 at its centre."""
+    volume, centre = ag.overlap(a, b)
+    if volume > 0:
+        return 0.0, centre, (0.0, 0.0, 1.0)
+    pa, pb = a.closest_points(b)
+    gap = pb - pa
+    direction = tuple(gap.normalized()) if gap.length > 0 else (0.0, 0.0, 1.0)
+    return gap.length, tuple((pa + pb) * 0.5), direction
+
+
+def _check_clear(iface, items):
+    distance, location, direction = _closest(items[iface.a].shape, items[iface.b].shape)
+    failures = []
+    if distance < iface.min_distance:
+        failures.append(f"{iface.a} is {_fmt(distance)} mm from {iface.b}, needs at least {_fmt(iface.min_distance)}")
+    passed = f"{iface.a} keeps {_fmt(distance)} mm from {iface.b}"
+    return _result(iface, [iface.a, iface.b], failures, {"distance": _num(distance)},
+                   {"min_distance": iface.min_distance}, location, [(location, direction)], passed)
+
+
+# --- overlap sweep ------------------------------------------------------------------------------------------------
+
+
+def intended_overlaps(interfaces, results=None) -> set:
+    """The item pairs whose overlap is intended, as frozensets of names.
+
+    A screw with the parts it threads into (thread or insert role); a snap's two parts only when the snap results
+    (`results`, {interface name: check_interface result}) of every snap between them put all of their overlap in
+    the bump regions, i.e. the overlap is the snap interference (which the snap check reports). Nothing else.
+    """
+    results = results or {}
+    pairs, snaps = set(), {}
+    for iface in interfaces:
+        if isinstance(iface, Bolted):
+            pairs |= {frozenset((iface.screw, name)) for name, role in iface.through if role in ("thread", "insert")}
+        elif isinstance(iface, Snap):
+            snaps.setdefault(frozenset((iface.bump, iface.catch)), []).append(results.get(iface.name))
+    for pair, found in snaps.items():
+        if any(r is None for r in found):
+            continue
+        total = found[0]["measured"]["overlap_mm3"] or 0.0
+        at_bumps = sum(r["measured"]["bump_overlap_mm3"] or 0.0 for r in found)
+        if total > 0 and total - at_bumps <= ag.OVERLAP_EPS:
+            pairs.add(pair)
+    return pairs
+
+
+def overlap_sweep(items, intended) -> list[dict]:
+    """Every pair of items {name: PlacedItem} that overlaps, other than the intended pairs (see intended_overlaps).
+
+    Each entry: a, b, volume_mm3, location (centre of the overlap's bounding box), planes (through it, normals z
+    and x), status "fail", message.
+    """
+    names = list(items)
+    entries = []
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            if frozenset((a, b)) in intended:
+                continue
+            volume, centre = ag.overlap(items[a].shape, items[b].shape)  # pairs whose boxes don't meet: 0 at once
+            if volume <= 0:
+                continue
+            point = [_num(v, 4) for v in centre]
+            entries.append({
+                "a": a,
+                "b": b,
+                "volume_mm3": _num(volume),
+                "location": point,
+                "planes": [(point, [0.0, 0.0, 1.0]), (point, [1.0, 0.0, 0.0])],
+                "status": "fail",
+                "message": f"{a} overlaps {b} by {_fmt(volume)} mm^3",
+            })
+    return entries
+
+
+# --- intent targets -----------------------------------------------------------------------------------------------
+
+
+def _point(p):
+    return "(" + ", ".join(_fmt(v) for v in p) + ")"
+
+
+def _measure_size(target, items):
+    boxes = [items[name].shape.bounding_box() for name in target.items]
+    lo = [min(tuple(b.min)[k] for b in boxes) for k in range(3)]
+    hi = [max(tuple(b.max)[k] for b in boxes) for k in range(3)]
+    i = "xyz".index(target.axis)
+    return list(target.items), hi[i] - lo[i], [(l + h) / 2 for l, h in zip(lo, hi)], None
+
+
+def _measure_gap(target, items):
+    a, b = items[target.a].shape, items[target.b].shape
+    names = [target.a, target.b]
+    if target.direction is None:
+        distance, location, _ = _closest(a, b)
+        return names, distance, location, None
+    # signed, along direction: b's first crossing minus a's last, on the line through the middle between them
+    d = np.array(target.direction)
+    mid = (np.array(tuple(a.bounding_box().center())) + np.array(tuple(b.bounding_box().center()))) / 2
+    hits = {name: ag._line_hits(shape, tuple(mid), tuple(d)) for name, shape in ((target.a, a), (target.b, b))}
+    missed = [name for name, found in hits.items() if not found]
+    if missed:
+        line = f"the line along {_point(d)} through {_point(mid)}"
+        return names, None, tuple(mid), f"{line} misses {missed[0]}"
+    far_a, near_b = max(hits[target.a]), min(hits[target.b])
+    return names, near_b - far_a, tuple(mid + d * (far_a + near_b) / 2), None
+
+
+def _measure_step(target, items):
+    names = [target.a, target.b]
+    hits = {}
+    for name, origin in ((target.a, target.origin_a), (target.b, target.origin_b)):
+        hits[name] = ag.probe(items[name].shape, origin, target.direction)
+        if hits[name] is None:
+            reason = f"the probe from {_point(origin)} along {_point(target.direction)} misses {name}"
+            return names, None, origin, reason
+    location = np.array(target.origin_a) + np.array(target.direction) * hits[target.a]
+    return names, hits[target.a] - hits[target.b], tuple(location), None
+
+
+def _measure_position(target, items):
+    """The hit point's coordinate along the probe's line, signed so the line's largest component is positive
+    (a probe along -x reports the x coordinate)."""
+    d = np.array(target.direction)
+    hit = ag.probe(items[target.item].shape, target.origin, target.direction)
+    if hit is None:
+        reason = f"the probe from {_point(target.origin)} along {_point(d)} misses {target.item}"
+        return [target.item], None, target.origin, reason
+    point = np.array(target.origin) + d * hit
+    axis = d if d[np.argmax(np.abs(d))] > 0 else -d
+    return [target.item], float(point @ axis), tuple(point), None
+
+
+def check_target(target, items) -> dict:
+    """Measure one intent target (Size, Gap, Step, Position) on the placed items and compare it with its value.
+
+    The keys of an interface result, with `measured` the measured number in mm (None when not found), `expected`
+    and `value` the target value, and `tol` its tolerance.
+    """
+    measure = {Size: _measure_size, Gap: _measure_gap, Step: _measure_step, Position: _measure_position}
+    names, value, location, missing = measure[type(target)](target, items)
+    failures = []
+    if target.value is None:
+        measures = "" if value is None else f", the model measures {_fmt(value)} mm"
+        failures.append(f"no target: {target.name} has no value{measures}; ask the user for it ({target.source})")
+    if missing:
+        failures.append(f"not found: {missing}")
+    if target.value is not None and value is not None and abs(value - target.value) > target.tol:
+        failures.append(
+            f"measured {_fmt(value)} mm, target {_fmt(target.value)} +/- {_fmt(target.tol)} ({target.source}): "
+            "the model and the document disagree; ask the user which is right"
+        )
+    passed = f"measured {_fmt(value or 0)} mm, target {_fmt(target.value or 0)} +/- {_fmt(target.tol)}"
+    result = _result(target, names, failures, _num(value), target.value, location, [], passed)
+    result.update(value=target.value, tol=target.tol)
+    return result

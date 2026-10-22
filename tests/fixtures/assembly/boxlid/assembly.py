@@ -49,7 +49,7 @@ def build_assembly(a):
     for side, sy in (("front", -1), ("back", 1)):
         interfaces.append(
             Snap(f"snap-{side}", "lid", "base", point=(0, sy * inner_y, groove), normal=(1, 0, 0),
-                 insert_dir=(0, 0, -1), engagement=(0.4, 0.6), clearance=(0.1, 0.2), source="fixture.md § Snap")
+                 insert_dir=(0, 0, -1), engagement=(0.3, 0.4), clearance=(0.1, 0.2), source="fixture.md § Snap")
         )
     interfaces += [
         Seat("lid-seat", "lid", "base", point=(0, -(by / 2 - wall / 2), RIM), normal=(0, 0, 1), source=SRC),
