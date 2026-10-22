@@ -28,6 +28,7 @@ NOTCH_REACH = 1.3  # in an open region, material within this many inscribed radi
 MIN_NOTCH_COVER = 200.0  # degrees of surrounding material a notch needs (a parallel open channel has about 160)
 COVER_BREAK = 10.0  # degrees, a wider angular gap between material points is uncovered
 CONVEX_RATIO = 0.99  # an inner wire is slot-like when its area is at least this share of its convex hull's
+ISLAND_AREA = 0.01  # mm^2, material inside an inner wire beyond this means it holds islands, so it isn't slot-like
 CLIP_FACTOR = 2.0  # the shape is clipped to a cylinder of this many search radii about the axis
 REGION_FACTOR = 1.9  # the free region is looked for within this many search radii (inside the clip)
 EDGE_MATCH = 1e-3  # mm, how close an edge must lie to the region circle to count as part of it
@@ -156,15 +157,23 @@ def _covered(centre, radius, walls, tree):
     return 360.0 - gaps[gaps > COVER_BREAK].sum()
 
 
-def _is_hole(centre, radius, walls, tree, closed):
-    """A closed region (inner wire, slot) needs an enclosed circle; an open one also needs a notch's cover."""
+def _hole_rank(centre, radius, walls, tree, closed):
+    """None when this circle isn't a hole's; otherwise a tie-break key, lower is better.
+
+    A closed region (inner wire, slot) needs an enclosed circle, and on ties the one nearest the axis wins, because a
+    slot's centre slides along it. An open region also needs a notch's cover, and on ties the best-covered circle
+    wins: that is the notch's end, which must not slide out along the channel towards the axis.
+    """
     if not _enclosed(centre, radius, walls, tree):
-        return False
-    return closed or _covered(centre, radius, walls, tree) >= MIN_NOTCH_COVER
+        return None
+    if closed:
+        return float(np.hypot(*centre))
+    cover = _covered(centre, radius, walls, tree)
+    return None if cover < MIN_NOTCH_COVER else -cover
 
 
 def _largest_inscribed(walls, segments, closed):
-    """The (centre, radius) of the largest hole circle inside the region, nearest the origin on ties."""
+    """The (centre, radius) of the largest hole circle inside the region, tie-broken by `_hole_rank`."""
     if len(walls) < 4:
         return None
     try:
@@ -176,30 +185,33 @@ def _largest_inscribed(walls, segments, closed):
         return None
     tree = cKDTree(walls)
     radii = tree.query(vertices)[0]
-    best = None
+    largest, best = None, None  # best: (rank, centre, radius)
     for index in np.argsort(-radii):
-        if best is not None and radii[index] < best[1] - INSCRIBED_TOL:
+        if largest is not None and radii[index] < largest - INSCRIBED_TOL:
             break
-        if not _is_hole(vertices[index], radii[index], walls, tree, closed):
+        rank = _hole_rank(vertices[index], radii[index], walls, tree, closed)
+        if rank is None:
             continue
-        if best is None:
-            best = [vertices[index], radii[index], radii[index]]
-        elif np.hypot(*vertices[index]) < np.hypot(*best[0]):
-            best[0], best[2] = vertices[index], radii[index]
-    return None if best is None else (best[0], best[2])
+        largest = radii[index] if largest is None else largest
+        if best is None or rank < best[0]:
+            best = (rank, vertices[index], radii[index])
+    return None if best is None else (best[1], best[2])
 
 
 def _in_slot_like_wire(shape, point, z):
-    """True when point lies in a convex closed hole (round hole, teardrop, straight slot) of shape's full section at z.
+    """True when point lies in a convex, empty closed hole (round hole, teardrop, straight slot) of shape's section at z.
 
-    Being inside a larger opening of another shape (a window with prongs in it, a comb) doesn't count.
+    Being inside a larger opening of another shape (a window with prongs reaching or standing in it) doesn't count.
     """
     faces = [face for piece in _pieces(shape.intersect(Plane.XY.offset(z))) for face in piece.faces()]
     for wire in (wire for face in faces for wire in face.inner_wires()):
         hole = Face(wire)
         if hole.is_inside(point):
             outline = np.concatenate([_discretise(edge) for edge in wire.edges()])
-            return hole.area >= CONVEX_RATIO * ConvexHull(outline).volume  # a 2D hull's volume is its area
+            if hole.area < CONVEX_RATIO * ConvexHull(outline).volume:  # a 2D hull's volume is its area
+                return False
+            empty = sum(piece.area for piece in hole.cut(*faces).faces())
+            return hole.area - empty <= ISLAND_AREA  # no other section face stands inside it
     return False
 
 
@@ -245,7 +257,9 @@ def _not_found(span, samples, reason):
 def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0) -> HoleProbe:
     """Find the hole (or edge notch) in shape that the axis through origin along direction passes through.
 
-    The axis must not cross any material, and the hole must be narrower than search_r.
+    The axis must not cross any material, and the hole must be narrower than search_r. Where the free region around
+    the axis runs past 1.9 x search_r, only a convex, empty closed hole (round, teardrop, straight slot) skips the
+    notch cover test, so a long arc slot or a slot with a nick in its edge reports "not a hole" (it fails safe).
     """
     local = Plane(origin=origin, z_dir=direction).to_local_coords(shape)
     box = local.bounding_box()

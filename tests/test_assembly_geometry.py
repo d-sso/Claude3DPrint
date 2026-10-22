@@ -107,6 +107,18 @@ def test_u_notch_round_end_is_hole():
     assert result.diameter == pytest.approx(3.4, abs=0.05)
 
 
+@pytest.mark.parametrize("end", ["round", "square"])
+def test_notch_offset_along_channel_is_measured(end):
+    # probed 0.5 mm out along the notch's channel: the notch's end circle doesn't slide towards the axis
+    if end == "round":
+        notch = Cylinder(1.7, 5, align=MIN_Z) + Box(20, 3.4, 5, align=(Align.MIN, Align.CENTER, Align.MIN))
+    else:
+        notch = Pos(-1.7, 0, 0) * Box(20, 3.4, 5, align=(Align.MIN, Align.CENTER, Align.MIN))
+    result = ag.hole_on_axis(plate() - notch, (0.5, 0, 0), (0, 0, 1), search_r=3)
+    assert result.found
+    assert result.offset == pytest.approx(0.5, abs=0.05)
+
+
 def test_square_end_notch_is_hole():
     # a flat-ended 3.4 wide slot from the plate's +X edge: the material still wraps well past 180 degrees
     notch = Pos(-1.7, 0, 0) * Box(20, 3.4, 5, align=(Align.MIN, Align.CENTER, Align.MIN))
@@ -172,6 +184,31 @@ def test_prongs_inside_window_not_hole():
     for x in (-4, 4):
         body += Pos(x, -6.5, 0) * Box(4, 17, 5, align=MIN_Z)  # y from -15 (the window edge) to +2
     result = ag.hole_on_axis(body, (0, 0, 0), (0, 0, 1), search_r=3)
+    assert not result.found
+    assert "not a hole" in result.reason
+
+
+def window_frame():
+    return Box(40, 40, 5, align=MIN_Z) - Box(30, 30, 5, align=MIN_Z)
+
+
+def island_prongs():
+    # two prongs 4 mm apart on the axis, y from -13 to +2, not touching the 30 x 30 window's edges
+    return Pos(-4, -5.5, 0) * Box(4, 15, 5, align=MIN_Z) + Pos(4, -5.5, 0) * Box(4, 15, 5, align=MIN_Z)
+
+
+def test_island_prongs_inside_window_not_hole():
+    # one solid: the prongs join the frame only through a bridge above them, far from the axis
+    bridge = Pos(0, -14, 5) * Box(12, 4, 2, align=MIN_Z)
+    pillars = Pos(-4, -12.5, 5) * Box(4, 1, 2, align=MIN_Z) + Pos(4, -12.5, 5) * Box(4, 1, 2, align=MIN_Z)
+    body = window_frame() + island_prongs() + bridge + pillars
+    result = ag.hole_on_axis(body, (0, 0, 0), (0, 0, 1), search_r=3)
+    assert not result.found
+    assert "not a hole" in result.reason
+
+
+def test_island_prongs_compound_not_hole():
+    result = ag.hole_on_axis(Compound([window_frame(), island_prongs()]), (0, 0, 0), (0, 0, 1), search_r=3)
     assert not result.found
     assert "not a hole" in result.reason
 
