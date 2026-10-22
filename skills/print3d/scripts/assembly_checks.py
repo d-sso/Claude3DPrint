@@ -646,31 +646,33 @@ def intended_overlaps(interfaces, results=None) -> set:
     return pairs
 
 
-def overlap_sweep(items, intended) -> list[dict]:
+def overlap_sweep(items, intended, pairs=None) -> list[dict]:
     """Every pair of items {name: PlacedItem} that overlaps, other than the intended pairs (see intended_overlaps).
 
+    pairs: only these (a, b) name pairs are looked at (None: every pair of items, in their order).
     Each entry: a, b, volume_mm3, location (centre of the overlap's bounding box), planes (through it, normals z
     and x), status "fail", message.
     """
-    names = list(items)
+    if pairs is None:
+        names = list(items)
+        pairs = [(a, b) for i, a in enumerate(names) for b in names[i + 1:]]
     entries = []
-    for i, a in enumerate(names):
-        for b in names[i + 1:]:
-            if frozenset((a, b)) in intended:
-                continue
-            volume, centre = ag.overlap(items[a].shape, items[b].shape)  # pairs whose boxes don't meet: 0 at once
-            if volume <= 0:
-                continue
-            point = [_num(v, 4) for v in centre]
-            entries.append({
-                "a": a,
-                "b": b,
-                "volume_mm3": _num(volume),
-                "location": point,
-                "planes": [(point, [0.0, 0.0, 1.0]), (point, [1.0, 0.0, 0.0])],
-                "status": "fail",
-                "message": f"{a} overlaps {b} by {_fmt(volume)} mm^3",
-            })
+    for a, b in pairs:
+        if frozenset((a, b)) in intended:
+            continue
+        volume, centre = ag.overlap(items[a].shape, items[b].shape)  # pairs whose boxes don't meet: 0 at once
+        if volume <= 0:
+            continue
+        point = [_num(v, 4) for v in centre]
+        entries.append({
+            "a": a,
+            "b": b,
+            "volume_mm3": _num(volume),
+            "location": point,
+            "planes": [(point, [0.0, 0.0, 1.0]), (point, [1.0, 0.0, 0.0])],
+            "status": "fail",
+            "message": f"{a} overlaps {b} by {_fmt(volume)} mm^3",
+        })
     return entries
 
 

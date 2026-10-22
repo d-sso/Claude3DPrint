@@ -672,6 +672,9 @@ class Layout:
         _unique(self, "items", [i.name for i in self.items])
         _unique(self, "interfaces", [i.name for i in self.interfaces])
         _unique(self, "targets", [t.name for t in self.targets])
+        for item in self.items:  # "<instance>.<item>" names the instances' items
+            if "." in item.name:
+                raise ValueError(f"{_where(self, 'items')}: item name {item.name!r} must not contain '.'")
         names = {r[0] for r in rows}
         if isinstance(self.exact, str):
             raise ValueError(f"{_where(self, 'exact')} must be a list of instance names, got {self.exact!r}")

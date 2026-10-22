@@ -322,3 +322,107 @@ def place_layout(layout, unit_items, builder=None):
             raise ValueError(f"Layout {layout.name!r}: the layout part {decl.name!r} needs a Builder to build it")
         placed[decl.name] = builder.item(decl) if builder else place_simple(decl)
     return placed
+
+
+# --- layout checks ------------------------------------------------------------------------------------------------
+
+
+def _instance_of(name):
+    """The instance of a placed layout name ("c1.block" -> "c1"); None for a layout item."""
+    inst, dot, _ = name.partition(".")
+    return inst if dot else None
+
+
+def _sweep_pairs(placed, layout):
+    """The pairs a layout's overlap sweep looks at, in placed order.
+
+    Items of different exact instances; inside an exact instance with overrides (a variant the unit level didn't
+    sweep); and every layout item against every other item, exact or not.
+    """
+    exact = set(layout.exact)
+    names = list(placed)
+    pairs = []
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            ia, ib = _instance_of(a), _instance_of(b)
+            if ia is None or ib is None:
+                pairs.append((a, b))
+            elif ia in exact and ib in exact and (ia != ib or ia in layout.overrides):
+                pairs.append((a, b))
+    return pairs
+
+
+def _unit_intended(layout, units):
+    """The unit-level intended overlaps (screws in their threads, ...) inside each overridden exact instance."""
+    import assembly_checks as ac
+
+    pairs = set()
+    for inst in layout.exact:
+        unit = units.get(layout.unit_of(inst))
+        if inst in layout.overrides and unit is not None:
+            pairs |= {frozenset(f"{inst}.{n}" for n in pair) for pair in ac.intended_overlaps(unit.interfaces)}
+    return pairs
+
+
+def check_layout(layout, unit_items, builder=None, *, units=None) -> dict:
+    """Check one layout: what happens between its unit instances. Returns a JSON-ready dict.
+
+    name, instances (the count), exact (the instance names checked with full solids), interfaces, overlaps,
+    targets, skipped.
+    - Interfaces are checked when every item they name belongs to an exact instance, or when they name a layout
+      item (a layout item is always checked exactly against the parts it names, exact or not). The others go to
+      `skipped` with a reason; they don't fail, but aren't passed either. An instance with overrides outside the
+      exact subset is listed there too, since its variant's own overlaps and joints aren't checked.
+    - Overlap sweep: between items of different exact instances, inside exact instances with overrides, and
+      each layout item against every other item (see _sweep_pairs). Pairs inside an unchanged instance are the
+      unit level's.
+    - Targets: evaluated on every instance (distances and probes are cheap).
+    units: {name: Unit} or a list of Units; gives the intended overlaps inside overridden exact instances.
+    Unit-level interfaces aren't repeated per instance; the unit level checks them once.
+    """
+    import assembly_checks as ac
+
+    if units is None:
+        units = {}
+    elif not isinstance(units, dict):
+        units = {u.name: u for u in units}
+    placed = place_layout(layout, unit_items, builder)
+    layout_items = {decl.name for decl in layout.items}
+    exact = set(layout.exact)
+
+    results, skipped = {}, []
+    for iface in layout.interfaces:
+        names = [name for _, name, _ in iface.references()]
+        outside = [n for n in names if n not in layout_items and _instance_of(n) not in exact]
+        if outside and not any(n in layout_items for n in names):
+            missing = sorted({_instance_of(n) for n in outside})
+            skipped.append({
+                "name": iface.name,
+                "type": ac._type_name(iface),
+                "items": names,
+                "reason": f"{', '.join(outside)} not in the exact subset ({', '.join(layout.exact) or 'none'}); "
+                          f"add {', '.join(missing)} to exact to check it",
+            })
+            continue
+        results[iface.name] = ac.check_interface(iface, placed)
+
+    for inst in layout.overrides:
+        if inst not in exact:
+            skipped.append({
+                "name": inst,
+                "type": "instance",
+                "items": sorted(n for n in placed if _instance_of(n) == inst),
+                "reason": f"{inst} has overrides (a variant of unit {layout.unit_of(inst)!r}) but isn't in the exact "
+                          "subset: its overlaps and joints with neighbours aren't checked; add it to exact",
+            })
+
+    intended = ac.intended_overlaps(layout.interfaces, results) | _unit_intended(layout, units)
+    return {
+        "name": layout.name,
+        "instances": len(layout.instances),
+        "exact": list(layout.exact),
+        "interfaces": list(results.values()),
+        "overlaps": ac.overlap_sweep(placed, intended, _sweep_pairs(placed, layout)),
+        "targets": [ac.check_target(target, placed) for target in layout.targets],
+        "skipped": skipped,
+    }
