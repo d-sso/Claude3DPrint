@@ -115,9 +115,9 @@ def load_model(path, shared_overrides=None):
     spec = importlib.util.spec_from_file_location(module_name, path, loader=SourceFileLoader(module_name, str(path)))
     module = importlib.util.module_from_spec(spec)
     root = print3d_shared.find_project_root(path)
-    saved_path = list(sys.path)
-    if root is not None:
-        sys.path.insert(0, str(root))
+    inserted = None if root is None else str(root)
+    if inserted is not None:
+        sys.path.insert(0, inserted)
     try:
         with print3d_shared.activate(root, shared_overrides):
             try:
@@ -129,7 +129,8 @@ def load_model(path, shared_overrides=None):
     except (Exception, SystemExit) as exc:
         raise RunError("load", f"{type(exc).__name__}: {exc}", exc=exc) from exc
     finally:
-        sys.path[:] = saved_path
+        if inserted is not None and inserted in sys.path:
+            sys.path.remove(inserted)
 
     params = getattr(module, "PARAMETERS", None)
     if not isinstance(params, dict):

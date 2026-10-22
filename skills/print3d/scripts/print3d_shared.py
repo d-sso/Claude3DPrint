@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import os
+import traceback
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
@@ -39,8 +41,11 @@ def load_interfaces(root):
     except SyntaxError as exc:
         raise ValueError(f"interfaces.py:{exc.lineno}: SyntaxError: {exc.msg}") from exc
     except Exception as exc:
-        tb = exc.__traceback__.tb_next if exc.__traceback__ else None
-        where = f"interfaces.py:{tb.tb_lineno}" if tb else "interfaces.py"
+        line = None
+        for frame in traceback.extract_tb(exc.__traceback__):
+            if os.path.normcase(os.path.abspath(frame.filename)) == os.path.normcase(os.path.abspath(path)):
+                line = frame.lineno
+        where = f"interfaces.py:{line}" if line else "interfaces.py"
         raise ValueError(f"{where}: {type(exc).__name__}: {exc}") from exc
     interfaces = getattr(module, "INTERFACES", None)
     if not isinstance(interfaces, dict):
