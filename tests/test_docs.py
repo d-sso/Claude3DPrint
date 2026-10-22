@@ -147,6 +147,9 @@ def test_assemblies_reference_examples_match_api():
     for needed in ("Assembly", "Unit", "Layout", "Part", "Screw", "Nut", "StandIn", "Bolted", "NutPocket", "Snap",
                    "Seat", "Passage", "Clear", "Size", "Gap", "Step", "Position"):
         assert needed in declared, needed
+    for helper in ("place", "flip", "polar", "linear", "grid", "repeat"):
+        assert f"{helper}(" in text, helper
+        assert callable(getattr(print3d_assembly, helper)), helper
     for name in re.findall(r"`(?:print3d_assembly\.)?([A-Z][A-Za-z]+)`", text):
         if name in ("Location", "PARAMETERS", "INTERFACES", "None", "True", "False"):
             continue

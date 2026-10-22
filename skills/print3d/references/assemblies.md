@@ -52,7 +52,7 @@ Working examples: `tests/fixtures/assembly/boxlid/` (unit) and `row/` (layout) i
 ```python
 from build123d import Box
 from print3d_assembly import (Assembly, Bolted, Clear, Gap, Layout, Nut, NutPocket, Part, Passage, Position,
-                              Screw, Seat, Size, Snap, StandIn, Step, Unit, Washer, flip, place)
+                              Screw, Seat, Size, Snap, StandIn, Step, Unit, Washer, flip, linear, place, polar, repeat)
 
 items = [
     Part("base", "parts/base/base.py", color=(200, 200, 200)),
@@ -93,7 +93,30 @@ Clear("battery-clear", "battery", "base", min_distance=1.0, source=SRC)
 - `Gap(name, a, b, direction_or_None, value, source=)`: distance between two items (None: smallest distance).
 - `Step(name, a, b, origin_a, origin_b, direction, value, source=)`: probe from each origin along `direction`; 0 means flush.
 - `Position(name, item, origin, direction, value, source=)`: where a probe first hits the item.
-- `value=None` fails as "no target".
+- A bound instead of a value: `value=None` with `min=` and/or `max=` (mm), e.g.
+  `Gap("battery-gap", "battery", "base", None, None, min=2.5, source=SRC)`. It passes iff min <= measured <= max
+  (no tolerance; an open end is unbounded) and `expected` is `{"min": .., "max": ..}`. Give either `value` (with `tol`) or bounds, never both.
+- No value and no bounds fails as "no target".
+
+### Patterns
+Repeated hardware and joints are declared once and copied with `repeat(template, locations, name="{name}-{i}")`:
+```python
+from print3d_assembly import linear, polar, repeat
+
+ring = polar(6, center=(0, 0, 0))          # 6 rotations about +Z: start_deg=0, step_deg=360/6, axis=(0, 0, 1)
+items += repeat(Screw("screw", "M3", "socket", 12.0, origin=(30, 0, 23), direction=(0, 0, 1)), ring)  # screw-0..5
+interfaces += repeat(Bolted("bolt-{i}", "screw-{i}", [("tray", "clearance"), ("frame", "thread")], source=SRC), ring)
+targets += repeat(Gap("edge-{i}", "c{i}.tile", "frame", None, None, min=2.5, source=SRC), linear(4, (0, 0, 0)))
+```
+- `polar(n, start_deg=0, step_deg=360/n, axis=(0, 0, 1), center=(0, 0, 0))`, `linear(n, (dx, dy, dz), start=(0, 0, 0))` and
+  `grid(nx, ny, dx, dy, start=(0, 0, 0))` return lists of Locations; any list of Locations (e.g. `place(...)`s) works.
+- Each copy is the template moved by one Location: points (`origin`, `point`, `origin_a`/`origin_b`) move,
+  directions and normals (`direction`, `normal`, `insert_dir`) only turn, a `Part`/`StandIn` `at` becomes `loc * at`,
+  and a `Size` axis turns with the rotation (it must stay X, Y or Z).
+- Names: `name` may use `{name}` (the template's name) and `{i}` (0-based index); a template name containing `{i}` is used as is.
+  A reference to another item (`screw`, `nut`, `through`, `a`, `b`, `item`, `bump`, `catch`, `items`, `part`) containing `{i}`
+  gets the same index; one without it is shared by every copy (`"tray"` above). Any other `{...}` is an error.
+- Copies are validated like hand-written declarations; the result is a plain list, so use it in any `Unit` or `Layout` list.
 
 ### Layouts
 ```python

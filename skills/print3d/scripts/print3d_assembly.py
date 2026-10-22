@@ -17,7 +17,9 @@ from __future__ import annotations
 import math
 import numbers
 from dataclasses import KW_ONLY, dataclass, field
+from dataclasses import replace as dataclass_replace
 
+from OCP.gp import gp_Pnt, gp_Vec
 from build123d import Location, Shape
 
 import hardware
@@ -462,12 +464,22 @@ INTERFACE_TYPES = (Bolted, NutPocket, Snap, Seat, Passage, Clear)
 
 
 # --- targets ------------------------------------------------------------------------------------------------------
-# value None is allowed on purpose: the check then fails with "no target:", so a missing number shows up.
+# A target is either `value` +/- `tol`, or bounds: `min` and/or `max` (mm, open ends allowed).
+# No value and no bounds is allowed on purpose: the check then fails with "no target:", so a missing number shows up.
 
 
 def _target(obj):
     _name(obj)
     obj.value = _num_field(obj, "value", optional=True)
+    obj.min = _num_field(obj, "min", optional=True)
+    obj.max = _num_field(obj, "max", optional=True)
+    if obj.value is not None and (obj.min is not None or obj.max is not None):
+        raise ValueError(
+            f"{_where(obj, 'value')} and min/max are both given; a target is either value (with tol) "
+            "or min and/or max, not both"
+        )
+    if obj.min is not None and obj.max is not None and obj.min > obj.max:
+        raise ValueError(f"{_where(obj, 'min')} must be at most max, got min {obj.min!r} and max {obj.max!r}")
     _source(obj)
     obj.tol = _num_field(obj, "tol", nonneg=True)
 
@@ -483,6 +495,8 @@ class Size:
     _: KW_ONLY
     source: str
     tol: float = TARGET_TOL
+    min: float | None = None
+    max: float | None = None
 
     def __post_init__(self):
         self.items = _names(self, "items")
@@ -505,6 +519,8 @@ class Gap:
     _: KW_ONLY
     source: str
     tol: float = TARGET_TOL
+    min: float | None = None
+    max: float | None = None
 
     def __post_init__(self):
         _name(self, "a")
@@ -530,6 +546,8 @@ class Step:
     _: KW_ONLY
     source: str
     tol: float = TARGET_TOL
+    min: float | None = None
+    max: float | None = None
 
     def __post_init__(self):
         _name(self, "a")
@@ -555,6 +573,8 @@ class Position:
     _: KW_ONLY
     source: str
     tol: float = TARGET_TOL
+    min: float | None = None
+    max: float | None = None
 
     def __post_init__(self):
         _name(self, "item")
@@ -743,3 +763,153 @@ class Assembly:
 
     def unit(self, name):
         return next((u for u in self.units if u.name == name), None)
+
+
+# --- patterns -----------------------------------------------------------------------------------------------------
+# polar/linear/grid make Locations; repeat(template, locations) copies one declaration onto each of them.
+
+
+def _count(where, value):
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError(f"{where} must be a positive whole number, got {value!r}")
+    return value
+
+
+def _triple(where, value, *, nonzero=False):
+    if not isinstance(value, (tuple, list)) or len(value) != 3:
+        raise ValueError(f"{where} must be (x, y, z), got {value!r}")
+    vec = tuple(_number(f"{where}[{i}]", v) for i, v in enumerate(value))
+    if nonzero and math.sqrt(sum(v * v for v in vec)) < 1e-9:
+        raise ValueError(f"{where} must be a non-zero direction, got {value!r}")
+    return vec
+
+
+def polar(n, *, start_deg=0.0, step_deg=None, axis=(0, 0, 1), center=(0, 0, 0)) -> list[Location]:
+    """n Locations rotating about `axis` through `center`: start_deg, start_deg + step_deg, ... (step: 360 / n)."""
+    n = _count("polar: n", n)
+    start = _number("polar: start_deg", start_deg)
+    step = 360.0 / n if step_deg is None else _number("polar: step_deg", step_deg)
+    axis = _triple("polar: axis", axis, nonzero=True)
+    center = _triple("polar: center", center)
+    to_center, from_center = Location(center), Location(tuple(-v for v in center))
+    return [to_center * Location((0, 0, 0), axis, start + k * step) * from_center for k in range(n)]
+
+
+def linear(n, step, *, start=(0, 0, 0)) -> list[Location]:
+    """n Locations moving by start, start + step, start + 2 * step, ... (step and start are (dx, dy, dz) in mm)."""
+    n = _count("linear: n", n)
+    step = _triple("linear: step", step)
+    start = _triple("linear: start", start)
+    return [Location(tuple(s + k * d for s, d in zip(start, step))) for k in range(n)]
+
+
+def grid(nx, ny, dx, dy, *, start=(0, 0, 0)) -> list[Location]:
+    """nx * ny Locations dx apart along X and dy apart along Y, row by row (x varies fastest)."""
+    nx, ny = _count("grid: nx", nx), _count("grid: ny", ny)
+    dx, dy = _number("grid: dx", dx), _number("grid: dy", dy)
+    x0, y0, z0 = _triple("grid: start", start)
+    return [Location((x0 + i * dx, y0 + j * dy, z0)) for j in range(ny) for i in range(nx)]
+
+
+# Per declaration type: fields moved as points, fields turned as directions, fields that name other items.
+_PATTERN_FIELDS = {
+    Part: ((), (), ()),
+    StandIn: ((), (), ()),
+    Screw: (("origin",), ("direction",), ()),
+    Nut: (("origin",), ("direction",), ()),
+    Washer: (("origin",), ("direction",), ()),
+    Bolted: ((), (), ("screw", "nut", "through")),
+    NutPocket: ((), (), ("nut", "part")),
+    Snap: (("point",), ("normal", "insert_dir"), ("bump", "catch")),
+    Seat: (("point",), ("normal",), ("a", "b")),
+    Passage: ((), ("direction",), ("item", "through")),
+    Clear: ((), (), ("a", "b")),
+    Size: ((), (), ("items",)),
+    Gap: ((), ("direction",), ("a", "b")),
+    Step: (("origin_a", "origin_b"), ("direction",), ("a", "b")),
+    Position: (("origin",), ("direction",), ("item",)),
+}
+
+
+def _pattern_text(where, text, **values):
+    if "{" not in text and "}" not in text:
+        return text
+    try:
+        return text.format(**values)
+    except (KeyError, IndexError, ValueError, AttributeError) as exc:
+        keys = " and ".join("{" + k + "}" for k in values)
+        raise ValueError(f"repeat: {where} {text!r} can't be filled in ({exc!r}); it may use only {keys}") from None
+
+
+def _moved(loc, value, *, direction):
+    """A point moved by `loc`, or (direction=True) a direction turned by its rotation only."""
+    trsf = loc.wrapped.Transformation()
+    v = (gp_Vec if direction else gp_Pnt)(*value).Transformed(trsf)
+    return tuple(0.0 if abs(c) < 1e-12 else c for c in (v.X(), v.Y(), v.Z()))
+
+
+def _turned_axis(template, loc):
+    """The Size axis after the rotation of `loc`: it must stay a principal axis."""
+    unit = [1.0 if a == template.axis else 0.0 for a in AXES]
+    for axis, c in zip(AXES, _moved(loc, unit, direction=True)):
+        if abs(abs(c) - 1.0) < 1e-6:
+            return axis
+    raise ValueError(
+        f"repeat: Size {template.name!r} axis {template.axis!r} is not along X, Y or Z after the rotation; "
+        "rotate a Size only by multiples of 90 degrees about X, Y or Z"
+    )
+
+
+def repeat(template, locations, *, name=None) -> list:
+    """Copies of one declaration (an item, interface or target), each moved by one of `locations`.
+
+    Points (origins, section points) move with the Location; directions and normals only turn; a Part's or
+    StandIn's `at` becomes loc * at; a Size axis turns with the rotation. Names: `name` is a pattern with {name}
+    (the template's name) and {i} (0-based index); default "{name}-{i}", or the template's own name when that
+    is a pattern itself ("bolt-{i}"). Names of other items (screw, nut, through, a, b, ...) that contain {i} get the same index; names
+    without it are kept, so every copy can refer to one shared part. Each copy is validated like a hand-written
+    declaration.
+    """
+    kind = type(template)
+    if kind not in _PATTERN_FIELDS:
+        raise ValueError(
+            f"repeat: template must be an item, interface or target "
+            f"({', '.join(t.__name__ for t in _PATTERN_FIELDS)}), got {kind.__name__}"
+        )
+    if isinstance(locations, Location) or not isinstance(locations, (tuple, list)):
+        raise ValueError(f"repeat: locations must be a list of Locations, e.g. polar(6); got {locations!r}")
+    for loc in locations:
+        if not isinstance(loc, Location):
+            raise ValueError(f"repeat: locations must hold build123d Locations, e.g. polar(6); got {loc!r}")
+    own = "{" in template.name or "}" in template.name  # a templated name: "bolt-{i}"
+    if name is None:
+        name = template.name if own else "{name}-{i}"
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"repeat: name must be a pattern string such as '{{name}}-{{i}}', got {name!r}")
+    points, directions, refs = _PATTERN_FIELDS[kind]
+    label = f"{kind.__name__} {template.name!r}"
+    copies = []
+    for i, loc in enumerate(locations):
+        base = _pattern_text("name", template.name, i=i) if own else template.name
+        changes = {"name": _pattern_text("name", name, name=base, i=i)}
+        for fld in refs:
+            value = getattr(template, fld)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                changes[fld] = _pattern_text(f"{label} {fld}", value, i=i)
+            elif kind is Bolted:  # through: ((item, role), ...)
+                changes[fld] = [(_pattern_text(f"{label} {fld}", item, i=i), role) for item, role in value]
+            else:
+                changes[fld] = [_pattern_text(f"{label} {fld}", item, i=i) for item in value]
+        for fld in points:
+            changes[fld] = _moved(loc, getattr(template, fld), direction=False)
+        for fld in directions:
+            if getattr(template, fld) is not None:
+                changes[fld] = _moved(loc, getattr(template, fld), direction=True)
+        if kind in (Part, StandIn):
+            changes["at"] = loc * template.at
+        if kind is Size:
+            changes["axis"] = _turned_axis(template, loc)
+        copies.append(dataclass_replace(template, **changes))
+    return copies

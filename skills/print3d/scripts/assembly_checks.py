@@ -735,26 +735,47 @@ def _measure_position(target, items):
     return [target.item], float(point @ axis), tuple(point), None
 
 
-def check_target(target, items) -> dict:
-    """Measure one intent target (Size, Gap, Step, Position) on the placed items and compare it with its value.
+def _bounds_text(lo, hi):
+    if lo is not None and hi is not None:
+        return f"{_fmt(lo)} to {_fmt(hi)}"
+    return f">= {_fmt(lo)}" if lo is not None else f"<= {_fmt(hi)}"
 
-    The keys of an interface result, with `measured` the measured number in mm (None when not found), `expected`
-    and `value` the target value, and `tol` its tolerance.
+
+def check_target(target, items) -> dict:
+    """Measure one intent target (Size, Gap, Step, Position) on the placed items and compare it with its target.
+
+    The keys of an interface result, with `measured` the measured number in mm (None when not found), `value` and
+    `tol` the target value and its tolerance. `expected` is the value, or {"min", "max"} for a bounded target
+    (passes iff min <= measured <= max; an open end is None).
     """
     measure = {Size: _measure_size, Gap: _measure_gap, Step: _measure_step, Position: _measure_position}
     names, value, location, missing = measure[type(target)](target, items)
+    lo, hi = target.min, target.max
+    bounded = lo is not None or hi is not None
     failures = []
-    if target.value is None:
+    if target.value is None and not bounded:
         measures = "" if value is None else f", the model measures {_fmt(value)} mm"
         failures.append(f"no target: {target.name} has no value{measures}; ask the user for it ({target.source})")
     if missing:
         failures.append(f"not found: {missing}")
+    disagree = "the model and the document disagree; ask the user which is right"
     if target.value is not None and value is not None and abs(value - target.value) > target.tol:
         failures.append(
             f"measured {_fmt(value)} mm, target {_fmt(target.value)} +/- {_fmt(target.tol)} ({target.source}): "
-            "the model and the document disagree; ask the user which is right"
+            + disagree
         )
-    passed = f"measured {_fmt(value or 0)} mm, target {_fmt(target.value or 0)} +/- {_fmt(target.tol)}"
-    result = _result(target, names, failures, _num(value), target.value, location, [], passed)
+    kind = _type_name(target)
+    if bounded and value is not None:
+        if lo is not None and value < lo:
+            failures.append(f"{kind} {_fmt(value)} mm is below the minimum {_fmt(lo)} ({target.source}): {disagree}")
+        if hi is not None and value > hi:
+            failures.append(f"{kind} {_fmt(value)} mm is above the maximum {_fmt(hi)} ({target.source}): {disagree}")
+    if bounded:
+        expected = {"min": lo, "max": hi}
+        passed = f"measured {_fmt(value or 0)} mm, target {_bounds_text(lo, hi)}"
+    else:
+        expected = target.value
+        passed = f"measured {_fmt(value or 0)} mm, target {_fmt(target.value or 0)} +/- {_fmt(target.tol)}"
+    result = _result(target, names, failures, _num(value), expected, location, [], passed)
     result.update(value=target.value, tol=target.tol)
     return result
