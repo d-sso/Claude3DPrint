@@ -17,6 +17,10 @@ the pull-out direction (-insert_dir), both from the declared point. Only materia
 counts, so the other snaps of the same parts don't. The bump region is the band of v where the bump part's section
 meets the catch's while it is pulled out; the running clearance is measured within CLEAR_MARGIN beside that band.
 
+A passage's stand-in is taken as straight: its run line goes through its bounding-box centre along the declared
+direction (or its longest bounding-box axis). The line must cross each part's material within the stand-in's extent
+and pass through an opening there (hole_on_axis), else "not found".
+
 overlap_sweep(items, intended) reports every overlapping pair not in `intended` (see intended_overlaps), and
 check_target(target, items) measures one intent target; a target without a value fails with "no target:".
 """
@@ -42,6 +46,7 @@ SNAP_WINDOW = 3.0  # mm, snap sections count within this of the point (across, a
 CLEAR_MARGIN = 1.0  # mm, a snap's running clearance is measured within this beside the bump band
 SEAT_SLAB = 2.0  # mm, a seat's overlap is measured in a slab this thick about its plane
 SEAT_REACH = 5.0  # mm, ... within this of its point in the plane, and its surfaces this far along the normal
+PASSAGE_REACH = 1.0  # mm, a passage's opening probe looks this much beyond the stand-in plus its clearance
 MIN_AREA = 1e-6  # mm^2, smaller section pieces are touching edges, not overlaps
 
 
@@ -531,16 +536,55 @@ def _longest_axis(box):
     return tuple(axis)
 
 
+def passage_search_r(cross_x, cross_y, min_clearance):
+    """search_r for a passage's opening probe: half the stand-in's cross-section diagonal, plus min_clearance and
+    PASSAGE_REACH. An opening whose walls all lie further out than that reads as open (not found), so the reach
+    keeps a loose opening measurable; the opening must still enclose the run line (hole_on_axis's rules)."""
+    return math.hypot(cross_x, cross_y) / 2 + min_clearance + PASSAGE_REACH
+
+
+def _run_line(iface, item):
+    """The stand-in's run line: (centre, direction, (lo, hi) extent along it, cross-section (x, y) size)."""
+    box = item.shape.bounding_box()
+    centre = tuple(box.center())
+    direction = iface.direction or _longest_axis(box)
+    local = Plane(origin=centre, z_dir=direction).to_local_coords(item.shape).bounding_box()
+    return centre, direction, (local.min.Z, local.max.Z), (local.size.X, local.size.Y)
+
+
+def _passes_through(part, centre, direction, extent, search_r):
+    """None when the run line crosses the part's material near it within the stand-in's extent, and that material
+    is an opening round the line; otherwise why not."""
+    local = Plane(origin=centre, z_dir=direction).to_local_coords(part)
+    box = local.bounding_box()
+    near = ag._clip(local, search_r, box.min.Z - 1.0, box.max.Z + 1.0)
+    if near is None:
+        return f"no material within {_fmt(search_r)} mm of its run line"
+    lo, hi = near.bounding_box().min.Z, near.bounding_box().max.Z
+    if lo < extent[0] - ag.RAY_TOL or hi > extent[1] + ag.RAY_TOL:
+        return (f"it runs from {_fmt(extent[0])} to {_fmt(extent[1])} mm along its line, the material near the line "
+                f"from {_fmt(lo)} to {_fmt(hi)}")
+    found = ag.hole_on_axis(part, centre, direction, search_r=search_r, span=extent)
+    return None if found.found else found.reason
+
+
 def _check_passage(iface, items):
+    """Stand-ins are taken as straight: one run line through the bounding-box centre along `direction`."""
     item = items[iface.item]
+    centre, direction, extent, cross = _run_line(iface, item)
+    search_r = passage_search_r(*cross, iface.min_clearance)
     failures = []
-    measured = {"overlap_mm3": {}, "clearance": {}}
+    measured = {"overlap_mm3": {}, "clearance": {}, "direction": [_num(v, 6) for v in direction],
+                "search_r": _num(search_r)}
     for name in iface.through:
         part = items[name].shape
         if not ag._boxes_meet(item.shape, part):
             failures.append(f"not found: {iface.item} doesn't reach {name} (their bounding boxes don't meet)")
             measured["overlap_mm3"][name] = measured["clearance"][name] = None
             continue
+        why = _passes_through(part, centre, direction, extent, search_r)
+        if why:
+            failures.append(f"not found: {iface.item} doesn't pass through an opening of {name} ({why})")
         volume = ag.overlap(item.shape, part)[0]
         clearance = 0.0 if volume > 0 else item.shape.distance_to(part)
         measured["overlap_mm3"][name], measured["clearance"][name] = _num(volume), _num(clearance)
@@ -548,12 +592,10 @@ def _check_passage(iface, items):
             failures.append(f"{iface.item} overlaps {name} by {_fmt(volume)} mm^3: {name} blocks it")
         elif clearance < iface.min_clearance:
             failures.append(f"{name}: clearance {_fmt(clearance)} mm, needs at least {_fmt(iface.min_clearance)}")
-    box = item.shape.bounding_box()
-    centre = tuple(box.center())
     expected = {"overlap_max": ag.OVERLAP_EPS, "clearance_min": iface.min_clearance}
     passed = f"{iface.item} passes through {', '.join(iface.through)} with at least {_fmt(iface.min_clearance)} mm"
     return _result(iface, [iface.item, *iface.through], _sorted_failures(failures), measured, expected, centre,
-                   [(centre, _longest_axis(box))], passed)
+                   [(centre, direction)], passed)
 
 
 def _closest(a, b):

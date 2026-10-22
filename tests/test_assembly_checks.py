@@ -168,6 +168,53 @@ def test_passage(rod_d, dx, min_clearance, status, text):
     assert text in result["message"]
 
 
+def passage(items, through, min_clearance=0.5, **kw):
+    return ac.check_interface(pa.Passage("cable", "rod", through, min_clearance, source="test", **kw), items)
+
+
+def test_passage_beside_part_not_found():
+    # an L-bracket without any hole; the rod stands in its inside corner, through nothing
+    bracket = Pos(0, 0, -1.5) * Box(20, 20, 3) + Pos(-8.5, 0, 8.5) * Box(3, 20, 20)
+    items = {"bracket": stand_in("bracket", bracket), "rod": stand_in("rod", Pos(2, 0, 10) * Cylinder(2, 12))}
+    result = passage(items, ["bracket"])
+    assert result["status"] == "fail"
+    assert result["message"].startswith("not found: rod doesn't pass through an opening of bracket")
+
+
+def test_passage_stops_short_not_found():
+    # the rod runs z 0.5..20.5: it ends inside the plate's hole (plate z -1.5..1.5)
+    items = {"plate": stand_in("plate", plate_with_hole()), "rod": stand_in("rod", Pos(0, 0, 10.5) * Cylinder(2, 20))}
+    result = passage(items, ["plate"])
+    assert result["status"] == "fail"
+    assert result["message"].startswith("not found: rod doesn't pass through an opening of plate")
+
+
+def test_passage_through_slot_passes():
+    # a 10 x 3 strip along x through closed 12 x 4 slots in four blocks in a row
+    blocks = {f"block{k}": stand_in(f"block{k}", Pos(20 * k, 0, 0) * (Box(4, 20, 12) - Box(4, 12, 4)))
+              for k in range(4)}
+    items = {**blocks, "rod": stand_in("rod", Pos(30, 0, 0) * Box(80, 10, 3))}
+    result = passage(items, list(blocks), min_clearance=0.4)
+    assert result["status"] == "pass", result["message"]
+    assert result["measured"]["direction"] == [1.0, 0.0, 0.0]
+    for name in blocks:
+        assert result["measured"]["clearance"][name] == pytest.approx(0.5, abs=0.01)
+    solid = {**items, "block2": stand_in("block2", Pos(40, 0, 0) * Box(4, 20, 12))}
+    result = passage(solid, list(blocks), min_clearance=0.4)
+    assert result["status"] == "fail" and "block2" in result["message"]
+
+
+def test_passage_direction_declared():
+    # a short, wide disc through a hole: its longest bounding-box axis lies across the hole, not along it
+    plate = Box(20, 20, 3) - Cylinder(4, 3)
+    items = {"plate": stand_in("plate", plate), "rod": stand_in("rod", Cylinder(3, 5))}
+    assert passage(items, ["plate"])["status"] == "fail"
+    result = passage(items, ["plate"], direction=(0, 0, 2))
+    assert result["status"] == "pass", result["message"]
+    assert result["measured"]["direction"] == [0.0, 0.0, 1.0]
+    assert result["planes"][0][1] == [0.0, 0.0, 1.0]
+
+
 # --- overlap sweep ------------------------------------------------------------------------------------------------
 
 

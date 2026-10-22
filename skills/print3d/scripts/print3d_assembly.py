@@ -406,13 +406,18 @@ class Seat:
 
 @dataclass
 class Passage:
-    """`item` passes through every part in `through` without overlap and with at least `min_clearance`."""
+    """`item` (a straight stand-in) passes through an opening of every part in `through`, without overlap and with
+    at least `min_clearance`.
+
+    `direction` is the stand-in's run direction; None: its longest bounding-box axis.
+    """
 
     name: str
     item: str
     through: list
     min_clearance: float
     _: KW_ONLY
+    direction: tuple | None = None
     source: str
     limit: float | None = None
 
@@ -421,6 +426,7 @@ class Passage:
         _name(self, "item")
         self.through = _names(self, "through")
         self.min_clearance = _num_field(self, "min_clearance", nonneg=True)
+        self.direction = _vec(self, "direction", unit=True, optional=True)
         _source(self)
         _limit(self)
 
