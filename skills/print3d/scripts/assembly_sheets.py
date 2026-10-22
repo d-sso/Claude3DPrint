@@ -238,16 +238,31 @@ def _check_items(result):
 
 
 def fault_pairs(results) -> set:
-    """Item pairs whose overlap is a fault, from check results: every overlap entry's pair, and the two items of a
-    check that measured an overlap volume > 0 itself (a snap whose interference the sweep left to it)."""
+    """Item pairs whose overlap is a fault, from check results.
+
+    Every overlap entry's pair, and every overlap volume > 0 a check measured itself: any measured key ending in
+    "overlap_mm3" (bump_overlap_mm3, a part of overlap_mm3, excepted). A number is an overlap between the check's
+    two items (a snap's interference, which the sweep leaves to it); a dict {item: volume} is one between the
+    check's first item and that item (a screw head sunk into a thread part). Faults are drawn red even where the
+    pair also engages (engaged_pairs).
+    """
     pairs = set()
     for r in results:
         if "a" in r and "b" in r:
             pairs.add(frozenset((r["a"], r["b"])))
-        elif isinstance(r.get("measured"), dict) and len(r.get("items", ())) == 2:
-            volume = r["measured"].get("overlap_mm3")
-            if isinstance(volume, (int, float)) and volume > 0:
-                pairs.add(frozenset(r["items"]))
+            continue
+        measured, items = r.get("measured"), r.get("items") or []
+        if not isinstance(measured, dict) or not items:
+            continue
+        prefix = f"{r['instance']}." if r.get("instance") else ""  # a layout variant's measured names are bare
+        for key, value in measured.items():
+            if not key.endswith("overlap_mm3") or key == "bump_overlap_mm3":
+                continue
+            if isinstance(value, dict):
+                pairs |= {frozenset((items[0], prefix + name)) for name, v in value.items()
+                          if isinstance(v, (int, float)) and v > 0}
+            elif isinstance(value, (int, float)) and value > 0 and len(items) == 2:
+                pairs.add(frozenset(items))
     return pairs
 
 

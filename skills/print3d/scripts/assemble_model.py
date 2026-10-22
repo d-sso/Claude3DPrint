@@ -10,7 +10,6 @@ import dataclasses
 import importlib.util
 import json
 import re
-import shutil
 import sys
 import time
 from dataclasses import dataclass, field
@@ -478,6 +477,7 @@ def check_layout(layout, unit_items, builder=None, *, units) -> dict:
 LEVELS = ("unit", "layout", "all")
 SHEET_DIR = "assembly"  # sheets go in out/assembly/<unit or layout>/<check>.png
 RESULT_FILE = "assembly.result.json"
+SHEET_MANIFEST = ".print3d-sheets.json"  # in out/assembly/: the sheets the last run wrote (only these are cleared)
 
 
 def _select(kind, declared, wanted):
@@ -619,15 +619,66 @@ def _group_sheets(group, kind, items, folder, title, highlight, result):
         result["warnings"].append(f"Overview sheet failed for {label}: {type(exc).__name__}: {exc}")
 
 
+def _inside(path, root):
+    """True when `path` (resolved: symlinks and junctions followed) lies inside the resolved `root`."""
+    try:
+        Path(path).resolve().relative_to(root)
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+def _prune_empty(folder, root):
+    """Remove the empty folders under `folder` (and it), bottom up; never descends through a link or junction."""
+    for child in sorted(folder.iterdir()):
+        real = child.resolve()
+        if child.is_dir() and real == root / child.relative_to(root) and _inside(real, root):
+            _prune_empty(child, root)
+    if not any(folder.iterdir()):
+        folder.rmdir()
+
+
 def clear_sheets(out, result):
-    """Remove out/assembly/ so no sheet from an earlier run sits next to this result (a failure is a warning)."""
+    """Remove the sheets an earlier run wrote, so none sits next to this result. Never deletes anything else.
+
+    Only the files listed in out/assembly/.print3d-sheets.json (written by stage_sheets) go, if they resolve to a
+    PNG inside out/assembly/; then the manifest and the folders left empty. Without a manifest nothing is deleted
+    and a warning says the sheets there may be stale. Any failure is a warning.
+    """
     folder = out / SHEET_DIR
-    if folder.exists():
-        try:
-            shutil.rmtree(folder)
-        except OSError as exc:
-            result["warnings"].append(f"Could not remove the old sheets in {folder.as_posix()}: {exc}; "
-                                      "sheets there may be from an earlier run")
+    if not folder.is_dir():
+        return
+    root = folder.resolve()
+    manifest = root / SHEET_MANIFEST
+    stale = f"{folder.as_posix()} has files print3d didn't list as its own sheets; any sheets there may be stale"
+    if not manifest.is_file():
+        result["warnings"].append(f"Not cleared: {stale}")
+        return
+    try:
+        listed = json.loads(manifest.read_text(encoding="utf-8"))["files"]
+        for rel in listed:
+            path = root / rel
+            if (isinstance(rel, str) and path.suffix.lower() == ".png" and _inside(path, root)
+                    and path.is_file() and not path.is_symlink()):
+                path.unlink()
+        manifest.unlink()
+        _prune_empty(root, root)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        result["warnings"].append(f"Could not clear the old sheets ({type(exc).__name__}: {exc}): {stale}")
+
+
+def _write_manifest(result, out):
+    """List every sheet this run wrote, relative to out/assembly/, so the next run can remove exactly those."""
+    root = (out / SHEET_DIR).resolve()
+    paths = [p for g in result["units"] + result["layouts"] for e in g["interfaces"] + g["overlaps"]
+             for p in e.get("evidence", [])] + [p for g in result["units"] + result["layouts"]
+                                                 for p in g["sheets"].values()]
+    files = sorted({Path(p).resolve().relative_to(root).as_posix() for p in paths if _inside(p, root)})
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / SHEET_MANIFEST).write_text(json.dumps({"files": files}, indent=2), encoding="utf-8")
+    except OSError as exc:
+        result["warnings"].append(f"Could not write the sheet list {SHEET_MANIFEST}: {exc}")
 
 
 def stage_sheets(result, unit_items, layout_items, layouts, out):
@@ -651,6 +702,7 @@ def stage_sheets(result, unit_items, layout_items, layouts, out):
         highlight = tuple(layout.exact) + tuple(decl.name for decl in layout.items)
         _group_sheets(group, "layout", layout_items[group["name"]], root / folders(group["name"]),
                       f"Layout {group['name']}  ·  {group['instances']} instances, exact: {exact}", highlight, result)
+    _write_manifest(result, out)
 
 
 def _exit_code(result, strict):
@@ -705,8 +757,9 @@ def assemble(path, set_pairs=(), level="all", unit=None, layout=None, out_dir=No
     level: "unit", "layout" or "all"; unit / layout: check only that one (--unit alone checks no layout, --layout
     alone no unit; the units a layout uses are built either way). `profile` is a print3d_profile.load_profile()
     dict (None: the default base profile). out_dir: default `out` next to assembly.py; sheets go in
-    out/assembly/<unit or layout>/<check>.png; out/assembly/ is emptied first on every successful check run, also
-    with sheets=False, so it never holds sheets from an earlier run. Exit codes: 0 ok (also with failing checks), 1 error, 2 usage,
+    out/assembly/<unit or layout>/<check>.png. Before building, the sheets the previous run listed in
+    out/assembly/.print3d-sheets.json are removed (also with sheets=False, and when the run then fails), so none
+    sits next to a newer result; nothing else is ever deleted (see clear_sheets). Exit codes: 0 ok (also with failing checks), 1 error, 2 usage,
     3 failing checks with strict.
     """
     path = Path(path).resolve()
@@ -738,6 +791,7 @@ def assemble(path, set_pairs=(), level="all", unit=None, layout=None, out_dir=No
         unit_list = _select("unit", {u.name: u for u in assembly.units}, unit) if check_units else []
         layout_list = _select("layout", {lay.name: lay for lay in assembly.layouts}, layout) if check_layouts else []
 
+        clear_sheets(out, result)  # first, and also with --no-sheets: no stale evidence next to this result
         stage = "build"
         builder = Builder(path.parent, shared_overrides, result)
         result["shared"] = {**builder.interfaces, **shared_overrides}
@@ -751,7 +805,6 @@ def assemble(path, set_pairs=(), level="all", unit=None, layout=None, out_dir=No
         stage = "check"
         _timed(result, "check", _stage_check, assembly, builder, unit_items, unit_list, layout_list, result)
 
-        clear_sheets(out, result)  # also with --no-sheets: no stale evidence next to this result
         if sheets:
             stage = "sheets"
             layouts = {lay.name: lay for lay in layout_list}

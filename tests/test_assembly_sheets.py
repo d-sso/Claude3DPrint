@@ -138,3 +138,18 @@ def test_engaged_and_overlap_key_lines():
     assert "engagement" in text and rgb == render_model.ENGAGED_RGB
     (text, rgb), = assembly_sheets.key_lines(overlap=True, engaged=False)
     assert "overlap" in text.lower() and rgb == render_model.OVERLAP_RGB
+
+
+def test_fault_pairs_from_every_measured_overlap():
+    results = [
+        {"type": "bolted", "items": ["screw", "block"], "instance": None,
+         "measured": {"head_overlap_mm3": {"block": 18.85}, "shank_overlap_mm3": {}, "engagement": {"block": 8}}},
+        {"type": "bolted", "items": ["b2.screw", "b2.lid"], "instance": "b2",
+         "measured": {"shank_overlap_mm3": {"lid": 1.2}, "head_overlap_mm3": {"lid": 0.0}}},
+        {"type": "snap", "items": ["lid", "base"], "measured": {"overlap_mm3": 0.4, "bump_overlap_mm3": 0.4}},
+        {"type": "seat", "items": ["lid", "base2"], "measured": {"overlap_mm3": 0.0}},
+        {"a": "x", "b": "y", "volume_mm3": 1.0},
+    ]
+    assert assembly_sheets.fault_pairs(results) == {
+        frozenset(("screw", "block")), frozenset(("b2.screw", "b2.lid")), frozenset(("lid", "base")),
+        frozenset(("x", "y"))}

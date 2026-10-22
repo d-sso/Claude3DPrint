@@ -186,15 +186,61 @@ def test_thread_engagement_sheet_is_not_fault_red(capsys, tmp_path):
 
 def test_stale_sheets_are_removed(capsys, tmp_path):
     out = tmp_path / "out"
-    stale = out / "assembly" / "box" / "old-check.png"
-    stale.parent.mkdir(parents=True)
-    stale.write_bytes(b"old")
+    code, data = assemble(capsys, BOXLID / "assembly.py", "--out", out)  # an earlier run's sheets
+    assert code == 0 and (out / "assembly" / "box" / "bolt-left.png").is_file()
+    assert (out / "assembly" / ".print3d-sheets.json").is_file()
     code, data = assemble(capsys, BOXLID / "assembly.py", "--out", out, "--no-sheets")
-    assert code == 0 and not (out / "assembly").exists()
-    stale.parent.mkdir(parents=True)
-    stale.write_bytes(b"old")
+    assert code == 0 and not (out / "assembly").exists()  # every listed sheet, the manifest, the empty folders
+    code, data = assemble(capsys, BOXLID / "assembly.py", "--out", out)
     code, data = assemble(capsys, ROW / "assembly.py", "--out", out, "--level", "unit")
-    assert code == 0 and not stale.exists() and (out / "assembly" / "cell" / "overview.png").is_file()
+    assert code == 0 and not (out / "assembly" / "box").exists()
+    assert (out / "assembly" / "cell" / "overview.png").is_file()
+
+
+def test_clear_keeps_user_files(capsys, tmp_path):
+    out = tmp_path / "out"
+    code, _ = assemble(capsys, BOXLID / "assembly.py", "--out", out)
+    assert code == 0
+    notes = out / "assembly" / "cad" / "notes.txt"
+    notes.parent.mkdir()
+    notes.write_text("mine", encoding="utf-8")
+    mine = out / "assembly" / "box" / "my-sketch.png"
+    mine.write_bytes(b"mine")
+    victim = tmp_path / "victim.png"  # a manifest entry that points out of the folder is never followed
+    victim.write_bytes(b"keep")
+    manifest = out / "assembly" / ".print3d-sheets.json"
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    data["files"].append("../../victim.png")
+    manifest.write_text(json.dumps(data), encoding="utf-8")
+    code, result = assemble(capsys, BOXLID / "assembly.py", "--out", out, "--no-sheets")
+    assert code == 0
+    assert notes.read_text(encoding="utf-8") == "mine" and mine.read_bytes() == b"mine" and victim.is_file()
+    assert not (out / "assembly" / "box" / "bolt-left.png").exists() and not manifest.exists()
+
+
+def test_clear_without_manifest_warns(capsys, tmp_path):
+    out = tmp_path / "out"
+    old = out / "assembly" / "box" / "old-check.png"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"old")
+    code, data = assemble(capsys, BOXLID / "assembly.py", "--out", out, "--no-sheets")
+    assert code == 0 and old.read_bytes() == b"old"
+    assert any("stale" in w and "assembly" in w for w in data["warnings"])
+
+
+def test_sunk_head_on_thread_part_is_red(capsys, tmp_path):
+    import render_model
+
+    project = tmp_path / "head"
+    project.mkdir()
+    text = THREAD_PROJECT.replace("origin=(0, 0, 10)", "origin=(0, 0, 9)")  # the head sinks 1 mm into the block
+    assert text != THREAD_PROJECT
+    (project / "assembly.py").write_text(text, encoding="utf-8")
+    code, data = assemble(capsys, project / "assembly.py")
+    assert code == 0, data["error"]
+    joint = data["units"][0]["interfaces"][0]
+    assert joint["status"] == "fail" and "head overlaps block" in joint["message"]
+    assert _has(_png(joint["evidence"][0]), render_model.OVERLAP_RGB)
 
 
 def test_summary_counts_interface_skips_only():
