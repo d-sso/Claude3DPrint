@@ -2,7 +2,7 @@
 import math
 
 import pytest
-from build123d import Align, Box, Circle, Cylinder, Plane, Polygon, Pos, extrude
+from build123d import Align, Box, Circle, Compound, Cylinder, Plane, Polygon, Pos, extrude
 
 import assembly_geometry as ag
 
@@ -45,6 +45,7 @@ def test_min_distance_overlap_is_zero():
 def test_round_hole_on_axis():
     result = ag.hole_on_axis(plate(hole_at=(0, 0)), (0, 0, 10), (0, 0, -1), search_r=3)
     assert result.found
+    assert result.reason == ""
     assert result.offset <= 0.02
     assert result.diameter == pytest.approx(3.4, abs=0.05)
     assert result.free_radius == pytest.approx(1.7, abs=0.05)
@@ -96,13 +97,72 @@ def test_axis_blocked_partway_not_found():
     assert not result.found
 
 
-def test_notch_on_axis():
+def test_u_notch_round_end_is_hole():
     # a 3.4 wide U-slot from the plate's +X edge, its round end centred on the axis
     slot = Pos(0, 0, 0) * Cylinder(1.7, 5, align=MIN_Z) + Box(20, 3.4, 5, align=(Align.MIN, Align.CENTER, Align.MIN))
     result = ag.hole_on_axis(plate() - slot, (0, 0, 0), (0, 0, 1), search_r=3)
     assert result.found
     assert result.offset <= 0.05
     assert result.diameter == pytest.approx(3.4, abs=0.05)
+
+
+def test_square_end_notch_is_hole():
+    # a flat-ended 3.4 wide slot from the plate's +X edge: the material still wraps well past 180 degrees
+    notch = Pos(-1.7, 0, 0) * Box(20, 3.4, 5, align=(Align.MIN, Align.CENTER, Align.MIN))
+    result = ag.hole_on_axis(plate() - notch, (0, 0, 0), (0, 0, 1), search_r=3)
+    assert result.found
+    assert result.offset <= 0.05
+    assert result.diameter == pytest.approx(3.4, abs=0.05)
+
+
+def test_long_closed_slot_is_hole():
+    # a closed slot longer than the search region, probed off its centreline: the centreline point nearest the axis
+    ends = Pos(-4, 0, 0) * Cylinder(1.7, 5, align=MIN_Z) + Pos(4, 0, 0) * Cylinder(1.7, 5, align=MIN_Z)
+    slot = ends + Box(8, 3.4, 5, align=MIN_Z)
+    result = ag.hole_on_axis(plate() - slot, (1, 0.2, 0), (0, 0, 1), search_r=3)
+    assert result.found
+    assert result.offset == pytest.approx(0.2, abs=0.05)
+    assert result.diameter == pytest.approx(3.4, abs=0.05)
+
+
+def test_membrane_on_axis_blocks():
+    # a 0.3 mm layer across the hole falls between the 1 mm samples; it still blocks the screw
+    body = plate() - Cylinder(1.7, 2.5, align=MIN_Z) - Pos(0, 0, 2.8) * Cylinder(1.7, 2.2, align=MIN_Z)
+    result = ag.hole_on_axis(body, (0, 0, 0), (0, 0, 1), search_r=3)
+    assert not result.found
+    assert "blocked" in result.reason
+
+
+def test_thin_cap_blocks():
+    # a blind hole from below, closed by a 0.15 mm cap inside the top end inset
+    body = plate() - Cylinder(1.7, 4.85, align=MIN_Z)
+    result = ag.hole_on_axis(body, (0, 0, 0), (0, 0, 1), search_r=3)
+    assert not result.found
+    assert "blocked" in result.reason
+
+
+def test_gap_between_blocks_not_hole():
+    blocks = Compound([Pos(-7, 0, 0) * Box(10, 20, 5, align=MIN_Z), Pos(7, 0, 0) * Box(10, 20, 5, align=MIN_Z)])
+    result = ag.hole_on_axis(blocks, (0, 0, 0), (0, 0, 1), search_r=3)
+    assert not result.found
+    assert "not a hole" in result.reason
+
+
+def test_gap_between_pins_not_hole():
+    pins = Compound([Pos(-3, 0, 0) * Cylinder(1, 5, align=MIN_Z), Pos(3, 0, 0) * Cylinder(1, 5, align=MIN_Z)])
+    result = ag.hole_on_axis(pins, (0, 0, 0), (0, 0, 1), search_r=3)
+    assert not result.found
+    assert "not a hole" in result.reason
+
+
+def test_open_parallel_channel_not_hole():
+    # fork prongs: a 3.4 wide channel whose closed end is 6 mm from the axis, open at the other end
+    fork = Pos(0, -8, 0) * Box(20, 4, 5, align=MIN_Z)
+    for x in (-5.85, 5.85):
+        fork += Pos(x, 2, 0) * Box(8.3, 16, 5, align=MIN_Z)
+    result = ag.hole_on_axis(fork, (0, 0, 0), (0, 0, 1), search_r=3)
+    assert not result.found
+    assert "not a hole" in result.reason
 
 
 def test_axis_through_two_parts_each_probed():
