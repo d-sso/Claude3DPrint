@@ -1,5 +1,6 @@
 """Exact measurement primitives for assembly checks, on simple build123d shapes."""
 import math
+import re
 
 import pytest
 from build123d import Align, Box, Circle, Compound, Cylinder, Plane, Polygon, Pos, extrude
@@ -163,6 +164,45 @@ def test_open_parallel_channel_not_hole():
     result = ag.hole_on_axis(fork, (0, 0, 0), (0, 0, 1), search_r=3)
     assert not result.found
     assert "not a hole" in result.reason
+
+
+def test_prongs_inside_window_not_hole():
+    # two prongs reach into a 30 x 30 window, 4 mm apart on the axis: inside an inner wire, but still an open channel
+    body = Box(40, 40, 5, align=MIN_Z) - Box(30, 30, 5, align=MIN_Z)
+    for x in (-4, 4):
+        body += Pos(x, -6.5, 0) * Box(4, 17, 5, align=MIN_Z)  # y from -15 (the window edge) to +2
+    result = ag.hole_on_axis(body, (0, 0, 0), (0, 0, 1), search_r=3)
+    assert not result.found
+    assert "not a hole" in result.reason
+
+
+def test_round_hole_next_to_window_is_hole():
+    body = Box(40, 40, 5, align=MIN_Z) - Pos(0, 10, 0) * Box(30, 16, 5, align=MIN_Z) - Cylinder(1.7, 5, align=MIN_Z)
+    result = ag.hole_on_axis(body, (0, 0, 0), (0, 0, 1), search_r=3)
+    assert result.found
+    assert result.offset <= 0.02
+    assert result.diameter == pytest.approx(3.4, abs=0.05)
+
+
+def test_split_clamp_hole_is_hole():
+    # a round hole with a 1 mm slit out to the plate's edge
+    slit = Box(20, 1, 5, align=(Align.MIN, Align.CENTER, Align.MIN))
+    result = ag.hole_on_axis(plate(hole_at=(0, 0)) - slit, (0, 0, 0), (0, 0, 1), search_r=3)
+    assert result.found
+    assert result.offset <= 0.02
+    assert result.diameter == pytest.approx(3.4, abs=0.05)
+
+
+def test_not_a_hole_names_failing_depth():
+    # a round hole for z 0..5, then an open gap between two blocks for z 5..10: the reason names a depth in the gap
+    blocks = [Pos(x, 0, 5) * Box(10, 20, 5, align=MIN_Z) for x in (-7, 7)]
+    body = Compound([plate(hole_at=(0, 0)), *blocks])
+    result = ag.hole_on_axis(body, (0, 0, 0), (0, 0, 1), search_r=3)
+    assert not result.found
+    assert result.reason.startswith("not a hole")
+    depth = float(re.search(r"at depth ([0-9.]+) mm", result.reason).group(1))
+    assert 5 < depth < 10
+    assert result.samples >= 5  # the round-hole samples below it were measured
 
 
 def test_axis_through_two_parts_each_probed():

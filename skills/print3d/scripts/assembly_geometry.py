@@ -11,7 +11,7 @@ import numpy as np
 from build123d import Compound, Face, Plane, Solid, Vector, Wire
 from OCP.BRepIntCurveSurface import BRepIntCurveSurface_Inter
 from OCP.gp import gp_Lin
-from scipy.spatial import QhullError, Voronoi, cKDTree
+from scipy.spatial import ConvexHull, QhullError, Voronoi, cKDTree
 
 OVERLAP_EPS = 0.01  # mm^3, smaller overlaps count as touching (boolean slivers on shared faces)
 AXIS_LIMIT = 0.1  # mm, coaxiality
@@ -27,6 +27,7 @@ MAX_CONTACT_GAP = 185.0  # degrees, a circle whose wall contacts leave a wider g
 NOTCH_REACH = 1.3  # in an open region, material within this many inscribed radii counts as surrounding the circle
 MIN_NOTCH_COVER = 200.0  # degrees of surrounding material a notch needs (a parallel open channel has about 160)
 COVER_BREAK = 10.0  # degrees, a wider angular gap between material points is uncovered
+CONVEX_RATIO = 0.99  # an inner wire is slot-like when its area is at least this share of its convex hull's
 CLIP_FACTOR = 2.0  # the shape is clipped to a cylinder of this many search radii about the axis
 REGION_FACTOR = 1.9  # the free region is looked for within this many search radii (inside the clip)
 EDGE_MATCH = 1e-3  # mm, how close an edge must lie to the region circle to count as part of it
@@ -188,10 +189,18 @@ def _largest_inscribed(walls, segments, closed):
     return None if best is None else (best[0], best[2])
 
 
-def _in_inner_wire(shape, point, z):
-    """True when point lies in a closed hole (an inner wire) of shape's full section at z."""
+def _in_slot_like_wire(shape, point, z):
+    """True when point lies in a convex closed hole (round hole, teardrop, straight slot) of shape's full section at z.
+
+    Being inside a larger opening of another shape (a window with prongs in it, a comb) doesn't count.
+    """
     faces = [face for piece in _pieces(shape.intersect(Plane.XY.offset(z))) for face in piece.faces()]
-    return any(Face(wire).is_inside(point) for face in faces for wire in face.inner_wires())
+    for wire in (wire for face in faces for wire in face.inner_wires()):
+        hole = Face(wire)
+        if hole.is_inside(point):
+            outline = np.concatenate([_discretise(edge) for edge in wire.edges()])
+            return hole.area >= CONVEX_RATIO * ConvexHull(outline).volume  # a 2D hull's volume is its area
+    return False
 
 
 def _hole_at_depth(local, clipped, z, search_r):
@@ -205,7 +214,7 @@ def _hole_at_depth(local, clipped, z, search_r):
     region = Face(Wire.make_circle(region_r, Plane.XY.offset(z))).cut(*faces)
     free = [face for face in region.faces() if face.is_inside(axis_point)]
     if not free:
-        return f"blocked: the axis is inside material at {z:.2f} mm along it"
+        return "blocked: the axis is inside material"
     walls, segments, closed = [], [], True
     for edge in free[0].edges():
         points = _discretise(edge)
@@ -221,10 +230,10 @@ def _hole_at_depth(local, clipped, z, search_r):
     if free_radius > search_r:
         return None
     if not closed:  # open within the search region; a long slot is still closed further out
-        closed = _in_inner_wire(local, axis_point, z)
+        closed = _in_slot_like_wire(local, axis_point, z)
     circle = _largest_inscribed(walls, np.concatenate(segments), closed)
     if circle is None:
-        return f"not a hole: the material around the axis at {z:.2f} mm doesn't enclose it"
+        return "not a hole: the material doesn't enclose the axis"
     centre, radius = circle
     return float(np.hypot(*centre)), 2.0 * float(radius), float(free_radius)
 
@@ -251,10 +260,12 @@ def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0
     if crossings:  # catches layers thinner than the sample step and the end insets
         return _not_found(span, 0, f"blocked: material on the axis at {crossings[0]:.2f} mm along it")
     measured = []
-    for z in _sample_depths(*span, step):
+    depths = _sample_depths(*span, step)
+    for number, z in enumerate(depths, 1):
         result = _hole_at_depth(local, clipped, z, search_r)
         if isinstance(result, str):
-            return _not_found(span, len(measured), result)
+            where = f" at depth {z:.2f} mm along the axis (sample {number} of {len(depths)})"
+            return _not_found(span, len(measured), result + where)
         if result is not None:
             measured.append(result)
     if not measured:
