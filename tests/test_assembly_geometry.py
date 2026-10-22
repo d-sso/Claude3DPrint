@@ -293,3 +293,20 @@ def test_section_faces_of_plate_with_hole():
     assert len(faces[0].inner_wires()) == 1
     assert faces[0].area == pytest.approx(400 - math.pi * 1.7**2, abs=0.01)
     assert ag.section_faces(plate(), (0, 0, 50), (0, 0, 1)) == []
+
+
+def test_span_ignores_material_beyond_it():
+    # a blind hole 3 deep from the top of a 5 mm plate: blocked on the whole axis, a hole within t -3..0 from the top
+    body = plate() - Pos(0, 0, 2) * Cylinder(1.7, 3, align=MIN_Z)
+    assert "blocked" in ag.hole_on_axis(body, (0, 0, 5), (0, 0, 1), search_r=3).reason
+    result = ag.hole_on_axis(body, (0, 0, 5), (0, 0, 1), search_r=3, span=(-3, 0))
+    assert result.found, result.reason
+    assert result.depth_span == pytest.approx((-3, 0), abs=1e-6)
+    deeper = ag.hole_on_axis(body, (0, 0, 5), (0, 0, 1), search_r=3, span=(-3.5, 0))
+    assert not deeper.found and "blocked" in deeper.reason
+
+
+def test_span_without_material_not_found():
+    result = ag.hole_on_axis(plate(hole_at=(0, 0)), (0, 0, 20), (0, 0, 1), search_r=3, span=(-10, 0))
+    assert not result.found
+    assert result.reason.startswith("no material within 3 mm of the axis between -10.00 and 0.00")

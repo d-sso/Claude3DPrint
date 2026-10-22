@@ -282,7 +282,7 @@ def _runs(owned):
     return runs
 
 
-def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0) -> HoleProbe:
+def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0, span=None) -> HoleProbe:
     """Find the hole (or edge notch) in shape that the axis through origin along direction passes through.
 
     The axis line must not cross any material. The depths along it are split into slabs at the shape's vertex
@@ -294,17 +294,26 @@ def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0
     come from all the qualifying depths only. Where the free region around the axis runs past 1.9 x search_r, only
     a convex, empty closed hole skips the notch cover test, so a long arc slot or a slot with a nick in its edge
     reports "not a hole" (it fails safe).
+
+    span=(lo, hi) limits everything to that range along the axis from origin (e.g. a screw from its tip to its
+    seating plane): only material there can block the axis or make a hole, and material beyond it (the floor of a
+    blind hole past the tip, a part further down the axis) is ignored.
     """
     local = Plane(origin=origin, z_dir=direction).to_local_coords(shape)
     box = local.bounding_box()
     z_lo, z_hi = box.min.Z - 1.0, box.max.Z + 1.0
-    clipped = _clip(local, CLIP_FACTOR * search_r, z_lo, z_hi)
+    within = ""
+    if span is not None:
+        z_lo, z_hi = max(z_lo, span[0]), min(z_hi, span[1])
+        within = f" between {span[0]:.2f} and {span[1]:.2f} mm along it"
+    clipped = _clip(local, CLIP_FACTOR * search_r, z_lo, z_hi) if z_hi - z_lo > RAY_TOL else None
     near = _clip(clipped, search_r, z_lo, z_hi) if clipped is not None else None
     if near is None:
-        return _not_found((math.nan, math.nan), 0, f"no material within {search_r} mm of the axis")
+        return _not_found((math.nan, math.nan), 0, f"no material within {search_r} mm of the axis{within}")
     span_box = near.bounding_box()
     span = (span_box.min.Z, span_box.max.Z)
-    crossings = _line_hits(clipped, (0, 0, 0), (0, 0, 1))
+    # crossings at the range's ends are the clip's own cap faces (or a hole floor exactly at the tip): not blocking
+    crossings = [w for w in _line_hits(clipped, (0, 0, 0), (0, 0, 1)) if z_lo + RAY_TOL < w < z_hi - RAY_TOL]
     if crossings:  # catches layers thinner than the sample step and the end insets
         return _not_found(span, 0, f"blocked: material on the axis at {crossings[0]:.2f} mm along it")
     open_reason = f"open: no wall within {search_r} mm of the axis"
@@ -329,7 +338,7 @@ def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0
             reason = (f"not a hole: only {longest:.2f} mm along the axis is a hole, it needs {need:.2f} mm "
                       f"(elsewhere {where})")
         elif not_hole:
-            reason = f"not a hole: the material doesn't enclose the axis ({where})"
+            reason = where if where.startswith("not a hole") else f"not a hole: {where}"
         else:
             reason = f"no material within {search_r} mm of the axis at the sampled depths"
         return _not_found(span, sum(len(measured) for _, _, measured in holes), reason, excluded)

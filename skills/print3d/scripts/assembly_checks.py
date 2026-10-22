@@ -7,6 +7,10 @@ A feature that can't be found fails with a message starting "not found:"; a chec
 
 Screw-axis positions are reported as t, the distance along the screw's +Z (tip -> head) from its seating plane:
 the head is at t > 0 and the shank runs down to t = -length.
+
+Bolted holes are looked for only within the screw's extent (t from the tip to 0): material beyond the tip (a blind
+hole's floor, a part further down the axis) neither blocks the screw nor counts as its hole. A thread or insert
+part's hole must start at least ENGAGE_PITCHES x pitch before the tip, and a nut must sit on the shank.
 """
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ from print3d_assembly import Bolted, NutPocket
 HEAD_RAYS = 12  # rays round the axis that find the surface under a head
 FLUSH_REACH = 0.5  # mm, a countersunk head's rim surface is probed this far outside the head
 PARALLEL_TOL = 1.0  # degrees, a nut axis within this of the screw axis counts as parallel
+ENGAGE_PITCHES = 2.0  # a thread or insert part's hole must reach at least this many pitches past its start
 
 
 def _num(value, digits=3):
@@ -148,9 +153,10 @@ def _check_bolted(iface, items):
 
     # (a) a hole on the axis in every part, (b) of a diameter that suits its role
     first_hole = None
+    shank_span = (fast.tip, 0.0)  # only the screw's own extent along the axis counts: tip to seating plane
     for name, role in iface.through:
         search_r = bolt_search_r(decl.size, role)
-        found = ag.hole_on_axis(items[name].shape, origin, direction, search_r=search_r)
+        found = ag.hole_on_axis(items[name].shape, origin, direction, search_r=search_r, span=shank_span)
         measured["search_r"][name] = _num(search_r)
         measured["offset"][name] = _num(found.offset) if found.found else None
         measured["diameter"][name] = _num(found.diameter) if found.found else None
@@ -180,6 +186,16 @@ def _check_bolted(iface, items):
                 failures.append(
                     f"{name}: insert hole diameter {_fmt(found.diameter)} mm, expected {_fmt(nominal)} "
                     f"+/- {_fmt(ag.AXIS_LIMIT)} (insert_hole('{decl.size}'))"
+                )
+        if role in ("thread", "insert"):
+            # the tip must run past the start of the hole (its head-side end) by ENGAGE_PITCHES x pitch
+            engaged, need = found.depth_span[1] - fast.tip, ENGAGE_PITCHES * fast.pitch
+            measured.setdefault("engagement", {})[name] = _num(engaged)
+            expected.setdefault("engagement_min", {})[name] = _num(need)
+            if engaged < need:
+                failures.append(
+                    f"{name}: screw engages {_fmt(engaged)} mm of the {role} hole, needs {_fmt(need)} "
+                    f"({_fmt(ENGAGE_PITCHES)} x pitch {_fmt(fast.pitch)})"
                 )
 
     # (c) the head seats
@@ -276,7 +292,13 @@ def _protrusion(iface, decl, fast, nut, axis_o, axis_d, limit, measured, expecte
             f"(limit {_fmt(limit)} mm)"
         )
     t1 = t0 + _nut_height(nut.decl) * float(nut_d @ axis_d)
-    far = min(t0, t1)
+    far, near = min(t0, t1), max(t0, t1)
+    measured["nut_span"] = [_num(far), _num(near)]
+    if near > ag.RAY_TOL:  # a nut beyond the tip is "too short" below; one above the seating plane isn't on the shank
+        failures.append(
+            f"{iface.nut}: the nut is not on the shank: it runs from {_fmt(far)} to {_fmt(near)} mm along the "
+            f"screw axis, the shank from {_fmt(fast.tip)} to 0"
+        )
     protrusion = far - fast.tip
     rule = iface.protrusion
     if rule is None:
