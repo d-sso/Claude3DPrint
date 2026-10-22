@@ -230,16 +230,47 @@ def test_split_clamp_hole_is_hole():
     assert result.diameter == pytest.approx(3.4, abs=0.05)
 
 
-def test_not_a_hole_names_failing_depth():
-    # a round hole for z 0..5, then an open gap between two blocks for z 5..10: the reason names a depth in the gap
+def test_hole_above_open_gap_measures_hole_only():
+    # a round hole for z 0..5, then an open gap between two blocks for z 5..10: the gap is excluded, not measured
     blocks = [Pos(x, 0, 5) * Box(10, 20, 5, align=MIN_Z) for x in (-7, 7)]
     body = Compound([plate(hole_at=(0, 0)), *blocks])
     result = ag.hole_on_axis(body, (0, 0, 0), (0, 0, 1), search_r=3)
+    assert result.found, result.reason
+    assert result.depth_span == pytest.approx((0, 5), abs=1e-6)
+    assert result.diameter == pytest.approx(3.4, abs=0.05)
+    assert result.samples >= 5
+    assert [(lo, hi) for lo, hi, _ in result.excluded] == pytest.approx([(5, 10)], abs=1e-6)
+    assert result.excluded[0][2].startswith("not a hole")
+
+
+def test_hole_beside_skirt_found():
+    # a 3 mm plate with a hole (z 4..7) and, below it, a skirt wall whose inner face is 2.65 mm from the axis
+    skirt = Pos(2.65, -10, 0) * Box(2, 20, 4, align=(Align.MIN, Align.MIN, Align.MIN))
+    body = plate(thickness=3, hole_at=(0, 0), z0=4) + skirt
+    result = ag.hole_on_axis(body, (0, 0, 0), (0, 0, 1), search_r=3)
+    assert result.found, result.reason
+    assert result.depth_span == pytest.approx((4, 7), abs=1e-6)  # the plate only
+    assert result.offset <= 0.02
+    assert result.diameter == pytest.approx(3.4, abs=0.05)
+    assert result.free_radius == pytest.approx(1.7, abs=0.05)
+    assert [(lo, hi) for lo, hi, _ in result.excluded] == pytest.approx([(0, 4)], abs=1e-6)
+
+
+def test_thin_lip_alone_not_enough():
+    # only a 0.3 mm lip (z 5..5.3) encloses the axis; below it an open gap between two blocks
+    blocks = [Pos(x, 0, 0) * Box(10, 20, 5, align=MIN_Z) for x in (-7, 7)]
+    body = Compound([*blocks, plate(thickness=0.3, hole_at=(0, 0), z0=5)])
+    result = ag.hole_on_axis(body, (0, 0, 0), (0, 0, 1), search_r=3)
     assert not result.found
     assert result.reason.startswith("not a hole")
-    depth = float(re.search(r"at depth ([0-9.]+) mm", result.reason).group(1))
-    assert 5 < depth < 10
-    assert result.samples >= 5  # the round-hole samples below it were measured
+    assert "0.30 mm" in result.reason
+
+
+def test_thin_plate_hole_found():
+    # a 0.6 mm plate is all the material there is: its whole thickness is enough
+    result = ag.hole_on_axis(plate(thickness=0.6, hole_at=(0, 0)), (0, 0, 0), (0, 0, 1), search_r=3)
+    assert result.found, result.reason
+    assert result.depth_span == pytest.approx((0, 0.6), abs=1e-6)
 
 
 def test_axis_through_two_parts_each_probed():

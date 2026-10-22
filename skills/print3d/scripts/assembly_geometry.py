@@ -18,8 +18,9 @@ AXIS_LIMIT = 0.1  # mm, coaxiality
 CONTACT_LIMIT = 0.1  # mm, seat and head gaps
 TARGET_TOL = 0.1  # mm, default target tolerance
 
-END_INSET = 0.2  # mm, hole samples stay this far inside the span along the axis
-MIN_SAMPLES = 3
+END_INSET = 0.2  # mm, hole samples stay this far inside each depth slab along the axis
+MIN_HOLE_DEPTH = 1.0  # mm, a hole must qualify over this long a range (or the whole material extent, if shorter)
+BREAK_MERGE = 1e-3  # mm, depth breakpoints closer than this are one
 WIRE_SPACING = 0.05  # mm, hole wires are discretised at this spacing
 INSCRIBED_TOL = 0.01  # mm, inscribed circles this close to the largest tie, and the one nearest the axis wins
 CONTACT_SLACK = 0.02  # mm, wall points this far beyond an inscribed circle still touch it
@@ -42,9 +43,11 @@ class HoleProbe:
     offset: float  # largest distance from the axis to the hole centre over the sampled depths
     diameter: float  # smallest inscribed diameter
     free_radius: float  # smallest distance from the axis to the wall
-    depth_span: tuple[float, float]  # along the axis from the origin, where the shape is within search_r
-    samples: int
+    depth_span: tuple[float, float]  # along the axis from the origin: the qualifying depths (found) or the
+    # depths where the shape is within search_r (not found)
+    samples: int  # qualifying samples measured
     reason: str = ""  # why the hole wasn't found, "" when it was
+    excluded: tuple = ()  # (lo, hi, reason) depth ranges near the axis that aren't a hole and weren't measured
 
 
 def _pieces(result):
@@ -114,12 +117,23 @@ def _clip(shape, radius, z_lo, z_hi):
     return Compound(solids) if solids else None
 
 
-def _sample_depths(lo, hi, step):
-    lo, hi = lo + END_INSET, hi - END_INSET
-    if hi < lo:
-        lo = hi = (lo + hi) / 2
-    count = max(MIN_SAMPLES, math.ceil((hi - lo) / step) + 1)
-    return np.linspace(lo, hi, count)
+def _slabs(clipped, lo, hi):
+    """Depth slabs between the Z levels of the clipped shape's vertices: within one the section's topology holds."""
+    levels = sorted({lo, hi, *(v.Z for v in clipped.vertices() if lo < v.Z < hi)})
+    merged = [levels[0]]
+    for z in levels[1:]:
+        if z - merged[-1] > BREAK_MERGE:
+            merged.append(z)
+    merged[-1] = hi
+    return list(zip(merged[:-1], merged[1:]))
+
+
+def _slab_depths(lo, hi, step):
+    """Sample depths in one slab, END_INSET inside its ends (just the middle when it is thinner)."""
+    if hi - lo <= 2 * END_INSET:
+        return [(lo + hi) / 2]
+    count = max(2, math.ceil((hi - lo - 2 * END_INSET) / step) + 1)
+    return list(np.linspace(lo + END_INSET, hi - END_INSET, count))
 
 
 def _discretise(edge):
@@ -250,16 +264,36 @@ def _hole_at_depth(local, clipped, z, search_r):
     return float(np.hypot(*centre)), 2.0 * float(radius), float(free_radius)
 
 
-def _not_found(span, samples, reason):
-    return HoleProbe(False, math.nan, math.nan, math.nan, span, samples, reason)
+def _not_found(span, samples, reason, excluded=()):
+    return HoleProbe(False, math.nan, math.nan, math.nan, span, samples, reason, tuple(excluded))
+
+
+def _runs(owned):
+    """Merge consecutive (lo, hi, result) depth ranges into runs of qualifying (tuple) or excluded (str) results."""
+    runs = []
+    for lo, hi, result in owned:
+        qualifies = isinstance(result, tuple)
+        if runs and runs[-1][3] == qualifies:
+            runs[-1][1] = hi
+            if qualifies:
+                runs[-1][2].append(result)
+        else:
+            runs.append([lo, hi, [result] if qualifies else result, qualifies])
+    return runs
 
 
 def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0) -> HoleProbe:
     """Find the hole (or edge notch) in shape that the axis through origin along direction passes through.
 
-    The axis must not cross any material, and the hole must be narrower than search_r. Where the free region around
-    the axis runs past 1.9 x search_r, only a convex, empty closed hole (round, teardrop, straight slot) skips the
-    notch cover test, so a long arc slot or a slot with a nick in its edge reports "not a hole" (it fails safe).
+    The axis line must not cross any material. The depths along it are split into slabs at the shape's vertex
+    levels and sampled; a depth qualifies when the section there is a hole narrower than search_r around the axis
+    (a closed, convex and empty inner wire, or material covering at least 200 degrees round a notch). Depths that
+    don't qualify, such as beside a wall or in open space, are excluded rather than measured, and listed in
+    `excluded`. The hole is found when the qualifying depths include one contiguous range at least
+    min(MIN_HOLE_DEPTH, the extent of material within search_r) long; offset, diameter, free_radius and depth_span
+    come from all the qualifying depths only. Where the free region around the axis runs past 1.9 x search_r, only
+    a convex, empty closed hole skips the notch cover test, so a long arc slot or a slot with a nick in its edge
+    reports "not a hole" (it fails safe).
     """
     local = Plane(origin=origin, z_dir=direction).to_local_coords(shape)
     box = local.bounding_box()
@@ -273,16 +307,33 @@ def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0
     crossings = _line_hits(clipped, (0, 0, 0), (0, 0, 1))
     if crossings:  # catches layers thinner than the sample step and the end insets
         return _not_found(span, 0, f"blocked: material on the axis at {crossings[0]:.2f} mm along it")
-    measured = []
-    depths = _sample_depths(*span, step)
-    for number, z in enumerate(depths, 1):
-        result = _hole_at_depth(local, clipped, z, search_r)
-        if isinstance(result, str):
-            where = f" at depth {z:.2f} mm along the axis (sample {number} of {len(depths)})"
-            return _not_found(span, len(measured), result + where)
-        if result is not None:
-            measured.append(result)
-    if not measured:
-        return _not_found(span, 0, f"no material within {search_r} mm of the axis at the sampled depths")
+    open_reason = f"open: no wall within {search_r} mm of the axis"
+    owned = []  # (lo, hi, result): each sample owns the depths up to half way to its neighbours in the slab
+    for lo, hi in _slabs(clipped, *span):
+        depths = _slab_depths(lo, hi, step)
+        bounds = [lo, *((a + b) / 2 for a, b in zip(depths[:-1], depths[1:])), hi]
+        for index, z in enumerate(depths):
+            result = _hole_at_depth(local, clipped, z, search_r)
+            if isinstance(result, str) and result.startswith("blocked"):
+                return _not_found(span, 0, f"{result} at depth {z:.2f} mm along the axis")
+            owned.append((bounds[index], bounds[index + 1], open_reason if result is None else result))
+    runs = _runs(owned)
+    excluded = tuple((lo, hi, reason) for lo, hi, reason, qualifies in runs if not qualifies)
+    holes = [(lo, hi, measured) for lo, hi, measured, qualifies in runs if qualifies]
+    need = min(MIN_HOLE_DEPTH, span[1] - span[0])
+    longest = max((hi - lo for lo, hi, _ in holes), default=0.0)
+    if longest < need - RAY_TOL:
+        where = "; ".join(f"{reason} at depths {lo:.2f} to {hi:.2f} mm" for lo, hi, reason in excluded)
+        not_hole = [reason for _, _, reason in excluded if reason.startswith("not a hole")]
+        if holes:
+            reason = (f"not a hole: only {longest:.2f} mm along the axis is a hole, it needs {need:.2f} mm "
+                      f"(elsewhere {where})")
+        elif not_hole:
+            reason = f"not a hole: the material doesn't enclose the axis ({where})"
+        else:
+            reason = f"no material within {search_r} mm of the axis at the sampled depths"
+        return _not_found(span, sum(len(measured) for _, _, measured in holes), reason, excluded)
+    measured = [result for _, _, results in holes for result in results]
     offsets, diameters, free_radii = zip(*measured)
-    return HoleProbe(True, max(offsets), min(diameters), min(free_radii), span, len(measured))
+    depth_span = (holes[0][0], holes[-1][1])
+    return HoleProbe(True, max(offsets), min(diameters), min(free_radii), depth_span, len(measured), "", excluded)

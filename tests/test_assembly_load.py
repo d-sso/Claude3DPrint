@@ -115,10 +115,9 @@ def test_same_model_different_params_builds_twice(monkeypatch):
 def test_flipped_part_hole_found_on_unit_axis():
     _, items, _ = build()
     lid = items["box"]["lid"].shape
-    # search_r 2.5, not 3: the lid skirt's inner face is 2.65 mm from the bolt axis, and hole_on_axis treats
-    # material within search_r that doesn't enclose the axis as "not a hole" (same result on the unplaced lid)
+    # the lid skirt's inner face is 2.65 mm from the bolt axis: those depths are excluded, the plate is measured
     for x in (-14.0, 14.0):
-        probe = hole_on_axis(lid, (x, 0, 20.0), (0, 0, -1), search_r=2.5)
+        probe = hole_on_axis(lid, (x, 0, 20.0), (0, 0, -1), search_r=3)
         assert probe.found, probe.reason
         assert probe.offset <= 0.05
         assert probe.depth_span == pytest.approx((-3.0, 0.0), abs=1e-6)  # the plate, now at z = 20..23
