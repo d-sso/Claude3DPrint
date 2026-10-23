@@ -474,3 +474,28 @@ def test_off_centre_nut_tunnel_not_counted_in_hole_offset():
     # without the nut declared on the joint, the tunnel is part of the hole and its offset counts
     bare = ac.check_interface(pa.Bolted("j", "screw", [("block", "clearance")], source="test"), items)
     assert bare["measured"]["offset"]["block"] == pytest.approx(0.12, abs=0.02)
+
+
+def nut_trap_joint(trap, hole_dx=0.0):
+    """An M3x12 through a 7 mm top part (z 3..10) into a nut trap part; the nut at z 0..2.4."""
+    top = Pos(0, 0, 3) * Box(20, 20, 7, align=MIN_Z) - Cylinder(1.8, 10, align=MIN_Z)
+    screw = pa.Screw("screw", "M3", "socket", 12.0, origin=(0, 0, 10), direction=(0, 0, 1))
+    nut = pa.Nut("nut", "M3", "hex", origin=(0, 0, 0), direction=(0, 0, 1))
+    items = {"top": stand_in("top", top), "trap": stand_in("trap", trap), "screw": assemble_model.place_simple(screw),
+             "nut": assemble_model.place_simple(nut)}
+    bolt = pa.Bolted("j", "screw", [("top", "clearance"), ("trap", "clearance")], nut="nut", source="test")
+    return ac.check_interface(bolt, items)
+
+
+def test_nut_trap_in_a_thin_part_measures_what_the_nut_leaves():
+    # a 3 mm part (z 0..3) with a centred 2.4 mm nut pocket: only 0.6 mm of it is the screw's hole, and that is enough
+    trap = Box(20, 20, 3, align=MIN_Z) - hex_prism(5.8, 2.4) - Cylinder(1.8, 3, align=MIN_Z)
+    result = nut_trap_joint(trap)
+    assert result["status"] == "pass", result["message"]
+    assert result["measured"]["hole_span"]["trap"] == pytest.approx([-7.6, -7.0], abs=1e-3)
+    # a part z -2..3 whose hole is 0.3 off the axis outside the nut's depths: that hole is measured and fails
+    off = (Pos(0, 0, -2) * Box(20, 20, 5, align=MIN_Z) - hex_prism(5.8, 2.4)
+           - Pos(0.3, 0, -2) * Cylinder(1.8, 5, align=MIN_Z))
+    result = nut_trap_joint(off)
+    assert result["status"] == "fail"
+    assert "trap: hole offset 0.3 mm from the screw axis" in result["message"]

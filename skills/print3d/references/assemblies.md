@@ -85,7 +85,7 @@ Clear("battery-clear", "battery", "base", min_distance=1.0, source=SRC)
 ```
 - **Bolted**: for each listed part, finds the hole on the screw's axis and checks its offset (<= limit) and its diameter by role (`clearance`: >= `screw_clearance(size)` - 0.1; `insert`: `insert_hole(size)` +/- 0.1; `thread`: only the pilot counts, see below), that the head seats (no gap, no overlap), that the shank overlaps nothing, and that the screw is long enough (`design-rules.md` "Fastener engagement"). The nut, if given, must sit on the shank. Whether the nut fits its pocket is a separate `NutPocket` check. `protrusion=` overrides the rule's minimum.
   - `thread` role: only depths where the hole is narrower than the screw's major diameter (the pilot, e.g. 2.5 for M3) count towards engagement. A thread part with no such depth within the screw's length (a clearance-size hole, or a counterbore the tip ends in) fails as `not found: no pilot hole smaller than M3 in <part> ...`.
-  - Nut depths: where a declared nut sits on the axis (within the axis limit), the depths it spans aren't measured as any part's hole (the pocket would skew the offset); `excluded` lists them as "not measured: the nut sits here". They are measured if they are all the material near the axis.
+  - Nut depths: where a declared nut sits on the axis (within the axis limit), the depths it spans aren't measured as any part's hole (the pocket would skew the offset); `excluded` lists them as "not measured: the nut sits here". What is left must still be a hole for min(1.0 mm, the material left near the axis) along it, so a nut trap in a thin part (3 mm part, 2.4 mm pocket) is measured on its last 0.6 mm. The nut's depths are measured if they are all the material near the axis.
   - `washer=`: the head seats on that `Washer` (head to washer top <= 0.1), and the washer seats on the part below it (<= 0.1, measured from its bottom face). `nut_washer=` (needs `nut=`): the washer touches the part above it (<= 0.1). Each washer must be on the screw axis (<= limit) and overlap no listed part, and the shank isn't checked against it. An undeclared washer under a head reads as a head gap. A countersunk head with `washer=` fails.
 - **NutPocket**: the nut sits in the pocket without overlap, can't turn (pocket across-flats below the nut's across-corners), and is on its screw's axis.
 - **Snap**: measured in the section through `point` with `normal`; `insert_dir` is the direction the bump part moves to snap in and lies in the section plane. `engagement` and `clearance` are `(min, max)` in mm or `None`. Engagement = how far the bump reaches past the catch edge = bump height minus the per-side running clearance. A typical PLA+ skirt is 0.3 to 0.8 mm (`design-rules.md` "Snap engagement"). `fit="name"` reports a profile fit alongside the clearance.
@@ -156,13 +156,14 @@ Each group lists `interfaces[]` (name, type, `status`, `measured`, `expected`, `
 - Known safe false fails ("not a hole"): curved or arc slots, slots with a nick in the edge, a slot with an unrelated pin inside.
 
 ### Passage
-- The part's material within reach of the run line splits into depth ranges (its connected pieces there). A range is an opening the stand-in passes when:
-  - it lies within the stand-in's length, or the part runs on past a stand-in end but the stand-in doesn't end inside an opening there;
-  - the run line crosses no material in it;
-  - its **shadow** along the line (its sections within the stand-in's length, 0.25 mm apart, put together) surrounds the line by the hole rules above, and the widest circle in it contains the line.
+- Each body (solid) of the part is looked at on its own: separate bodies never make one opening together, even where they touch. A part built as a compound of unfused pieces can therefore fail; fuse it.
+- A body's material within reach of the run line splits into depth ranges: its pieces there, merged where their depths overlap or touch. A range is an opening the stand-in passes when:
+  - it lies within the stand-in's length, or the body runs on past a stand-in end but the stand-in doesn't end inside an opening there;
+  - the run line crosses no material of the part in it;
+  - its **shadow** along the line (the body's sections in the range and within the stand-in's length, 0.25 mm apart, put together) surrounds the line by the hole rules above, and the widest circle in it contains the line.
 - The shadow is what finds a slot in a wall at an angle to the line: no single cross-section closes round the line there.
 - Material beyond the stand-in's ends doesn't count, so a box's far wall on the line is fine.
-- A stand-in ends inside an opening when the section just inside its end surrounds the line (a rod stopping in a hole), or when an opening's shadow runs across its end (a strip stopping inside a slanted slot). That fails.
+- A stand-in ends inside an opening when the section just inside its end (0.2 mm in, or half way into the body when it enters less) surrounds the line (a rod stopping in a hole, however shallow), or when an opening's shadow runs across its end (a strip stopping inside a slanted slot). That fails.
 - `measured`: `opening` (the depth range used, from the stand-in's centre), `aperture` (the widest circle's diameter in the shadow), `clearance`, `overlap_mm3`.
 - U-clips and troughs (about 290 degrees of cover) count as openings.
 - Known safe false fail: a stand-in that stops within its reach (half its cross-section diagonal + `min_clearance` + 1 mm) past a slanted opening.

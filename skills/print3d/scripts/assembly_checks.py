@@ -788,7 +788,7 @@ def _measure_gap(target, items):
 
 
 def _measure_step(target, items):
-    names = [target.a, target.b]
+    names = list(dict.fromkeys((target.a, target.b)))  # one name when both faces are on the same item
     hits = []  # one per probe, in order: a and b may be the same item
     for name, origin in ((target.a, target.origin_a), (target.b, target.origin_b)):
         hits.append(ag.probe(items[name].shape, origin, target.direction))

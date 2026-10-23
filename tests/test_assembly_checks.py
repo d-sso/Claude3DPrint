@@ -301,6 +301,37 @@ def test_passage_through_a_gap_between_bodies_not_found():
     assert result["status"] == "fail"
     assert result["message"].startswith("not found: rod doesn't pass through an opening of blocks")
 
+
+@pytest.mark.parametrize("depth", [0.05, 0.1, 0.19])
+def test_passage_shallow_entry_fails(depth):
+    # the rod comes down from above and stops `depth` into the plate's hole (plate z -1.5..1.5)
+    rod = Pos(0, 0, 1.5 - depth + 10) * Cylinder(2, 20)
+    items = {"plate": stand_in("plate", plate_with_hole()), "rod": stand_in("rod", rod)}
+    result = passage(items, ["plate"])
+    assert result["status"] == "fail"
+    assert "it ends inside an opening" in result["message"]
+
+
+def corner_l(sx, sy, z0, h=2):
+    """An L of two 3 mm bars round the origin, at the (sx, sy) corner, z0..z0 + h."""
+    return Pos(sx * 4.5, 0, z0 + h / 2) * Box(3, 12, h) + Pos(0, sy * 4.5, z0 + h / 2) * Box(12, 3, h)
+
+
+def test_passage_separate_bodies_never_make_one_opening():
+    from build123d import Compound
+
+    rod = stand_in("rod", Cylinder(2, 20))
+    two_ls = Compound([corner_l(-1, -1, 0), corner_l(1, 1, 2)])  # touching depths, but two bodies
+    bars = [Pos(-4.5, 0, 1) * Box(3, 12, 2), Pos(0, -4.5, 3) * Box(12, 3, 2), Pos(4.5, 0, 5) * Box(3, 12, 2),
+            Pos(0, 4.5, 7) * Box(12, 3, 2)]  # four separate bars at four depths, one on each side
+    for shape in (two_ls, Compound(bars)):
+        result = passage({"part": stand_in("part", shape), "rod": rod}, ["part"])
+        assert result["status"] == "fail"
+        assert result["message"].startswith("not found: rod doesn't pass through an opening of part")
+    fused = passage({"part": stand_in("part", corner_l(-1, -1, 0) + corner_l(1, 1, 2)), "rod": rod}, ["part"])
+    assert fused["status"] == "pass", fused["message"]  # one connected body: a real ring round the rod
+    assert fused["measured"]["opening"]["part"] == pytest.approx([0.0, 4.0], abs=1e-3)
+
 # --- clear and step -----------------------------------------------------------------------------------------------
 
 
@@ -322,6 +353,7 @@ def test_step_on_one_item_measures_both_faces():
     result = ac.check_target(step, items)
     assert result["status"] == "pass", result["message"]
     assert result["measured"] == pytest.approx(1.5, abs=1e-6)
+    assert result["items"] == ["p"]
 
 
 # --- overlap sweep ------------------------------------------------------------------------------------------------
