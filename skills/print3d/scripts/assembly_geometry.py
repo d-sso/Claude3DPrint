@@ -528,11 +528,77 @@ def _ends_in_opening(local, clipped, end, inward, part_range, search_r):
     inside = end + inward * min(END_INSET, entered / 2)
     if _encloses(_hole_at_depth(local, clipped, inside, search_r)):
         return True
-    reach = (max(part_range[0], end - search_r), min(part_range[1], end + search_r))
+    return _across(clipped, end, part_range, search_r)
+
+
+def _across(clipped, z, part_range, search_r):
+    """True when an opening runs across depth z: the shadow of the material within search_r of z encloses the axis,
+    while neither side's alone does."""
+    reach = (max(part_range[0], z - search_r), min(part_range[1], z + search_r))
     if not _encloses(_shadow(clipped, *reach, search_r)):
         return False
-    below, above = (reach[0], end), (end, reach[1])
+    below, above = (reach[0], z), (z, reach[1])
     return not any(hi - lo > RAY_TOL and _encloses(_shadow(clipped, lo, hi, search_r)) for lo, hi in (below, above))
+
+
+def _entry(local, clipped, end, inward, part_range, search_r, limit=MIN_HOLE_DEPTH):
+    """How far (up to limit) back from its end, on its `inward` side, the stand-in stays inside the opening.
+
+    The depths are walked per slab (so a hole's own face is found exactly) while their sections enclose the axis.
+    At the first that doesn't, an opening running across it (_across, a slanted slot) carries the walk on only when
+    one also runs across the limit; otherwise the walk stops there. At the first sample that is known (the caller
+    found the end inside an opening, and not by its section), so this costs one or two _across tests."""
+    lo, hi = sorted((end, end + inward * limit))
+    slabs = _slabs(clipped, lo, hi) if hi - lo > RAY_TOL else []
+    reached = 0.0
+    for s0, s1 in (slabs if inward > 0 else slabs[::-1]):
+        depths = _slab_depths(s0, s1, SHADOW_STEP)
+        for z in (depths if inward > 0 else depths[::-1]):
+            if _encloses(_hole_at_depth(local, clipped, z, search_r)):
+                reached = abs(z - end)
+                continue
+            # the first sample: the end is inside by its shadow (_ends_in_opening), so an opening runs across it
+            if reached > 0 and not _across(clipped, z, part_range, search_r):
+                return reached
+            return limit if _across(clipped, end + inward * limit, part_range, search_r) else abs(z - end)
+        reached = abs((s1 if inward > 0 else s0) - end)
+    return limit
+
+
+def _ends_in_two_runs(local, clipped, extent, part_range, search_r, hits, where, reasons):
+    """ends_inside with the body's material running on past both ends of the stand-in, each end inside an opening:
+    an OpeningProbe when the ends sit in two different opening runs (a section between them doesn't enclose the
+    axis) and each is entered by min(MIN_HOLE_DEPTH, half its run), else None (adding why not to `reasons`). Each
+    end's shadow, from search_r on its body side to search_r past it (or the first material on the line past it),
+    must enclose the axis; the result has the largest offset and the smallest diameter of the two."""
+    (e0, e1), (a, b) = extent, part_range
+    if all(_encloses(_hole_at_depth(local, clipped, (s0 + s1) / 2, search_r)) for s0, s1 in _slabs(clipped, e0, e1)):
+        reasons.append(f"it ends inside an opening at {e0:.2f} mm along its line and doesn't enter it from a face of "
+                       f"the part ({where})")
+        return None
+    for end, inward in ((e0, 1), (e1, -1)):
+        entered = _entry(local, clipped, end, inward, part_range, search_r)
+        outer = a if inward > 0 else b
+        need = min(MIN_HOLE_DEPTH, abs(end + inward * entered - outer) / 2)
+        if entered < need - RAY_TOL:
+            reasons.append(f"it enters the opening only {entered:.2f} mm, it needs {need:.2f} mm "
+                           f"(it ends at {end:.2f} mm along its line; {where})")
+            return None
+    crossings = [w for w in hits if e0 + RAY_TOL < w < e1 - RAY_TOL]
+    if crossings:
+        reasons.append(f"blocked: material on its line at {crossings[0]:.2f} mm along it")
+        return None
+    results = []
+    for seen in ((max([a, e0 - search_r, *(w for w in hits if w < e0 + RAY_TOL)]), min(e1, e0 + search_r)),
+                 (max(e0, e1 - search_r), min([b, e1 + search_r, *(w for w in hits if w > e1 - RAY_TOL)]))):
+        result = _shadow(clipped, *seen, search_r)
+        if not _encloses(result):
+            why = "no wall near the line" if result is None else (
+                result if isinstance(result, str) else "the opening's widest circle doesn't contain the line")
+            reasons.append(f"{why}, seen along the line from {seen[0]:.2f} to {seen[1]:.2f} mm")
+            return None
+        results.append(result)
+    return OpeningProbe(True, (e0, e1), max(r[0] for r in results), min(r[1] for r in results))
 
 
 def passage_opening(shape, origin, direction, *, search_r: float, extent, ends_inside: bool = False) -> OpeningProbe:
@@ -557,9 +623,10 @@ def passage_opening(shape, origin, direction, *, search_r: float, extent, ends_i
     the range's other end lies within its extent (it entered the opening from that face of the body) and it runs
     at least min(MIN_HOLE_DEPTH, half the range) into the range from that face. The line must cross no material
     from that face to the stand-in's end, and the shadow from that face to search_r past the end, or to the first
-    material on the line past it (a blind hole's floor), must enclose the line. A stand-in with the body's material
-    running on past both of its ends still fails, and so does one that ends before an opening (that is no opening
-    across its end).
+    material on the line past it (a blind hole's floor), must enclose the line. With the body's material running on
+    past both ends and both inside openings, the ends must sit in two different opening runs, each entered by
+    min(MIN_HOLE_DEPTH, half its run) (see _ends_in_two_runs); a stand-in wholly inside one opening run fails. So
+    does one that ends before an opening (that is no opening across its end).
     """
     local = Plane(origin=origin, z_dir=direction).to_local_coords(shape)
     box = local.bounding_box()
@@ -599,6 +666,12 @@ def _body_opening(local, clipped, near, whole, extent, search_r, reasons, ends_i
                 if runs_on]
         inside = [(end, inward) for end, inward in ends
                   if _ends_in_opening(local, clipped, end, inward, (a, b), search_r)]
+        if ends_inside and len(inside) == 2:  # both ends inside: they must sit in two different opening runs
+            probe = _ends_in_two_runs(local, clipped, (e0, e1), (a, b), search_r,
+                                      _line_hits(whole, (0, 0, 0), (0, 0, 1)), where, reasons)
+            if probe is not None:
+                return probe
+            continue
         if inside and not (ends_inside and len(ends) == 1):  # with ends_inside: entered from the range's other end
             entry = " and doesn't enter it from a face of the part" if ends_inside else ""
             reasons.append(f"it ends inside an opening at {inside[0][0]:.2f} mm along its line{entry} ({where})")

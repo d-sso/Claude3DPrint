@@ -798,8 +798,9 @@ def _stage_check(assembly, builder, unit_items, unit_list, layout_list, result):
     for group in result["layouts"]:
         count = sum(entry["type"] != "instance" for entry in group["skipped"])
         if count:
-            result["warnings"].append(f"layout {group['name']}: {count} interfaces skipped (not in the exact subset); "
-                                      "they are not checked")
+            noun, pronoun = ("interface", "it is") if count == 1 else ("interfaces", "they are")
+            result["warnings"].append(f"layout {group['name']}: {count} {noun} skipped (not in the exact subset); "
+                                      f"{pronoun} not checked")
     groups = result["units"] + result["layouts"]
     for group in groups:
         for entry in group["interfaces"] + group["overlaps"]:

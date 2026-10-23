@@ -405,6 +405,36 @@ def test_passage_ends_inside_a_blind_hole():
     assert result["status"] == "pass", result["message"]
 
 
+def two_slot_tray():
+    """tray() with the same 12 x 4 slot (z 0.5..4.5) in its +x end wall (x 28..30) too."""
+    return tray() - Pos(29, 0, 2.5) * Box(2, 12, 4)
+
+
+def test_passage_ends_inside_slots_on_both_sides_of_one_part():
+    # one strip across the tray (x -29..29): each end half way into the slot of an end wall (x -30..-28, 28..30)
+    items = {"tray": stand_in("tray", two_slot_tray()), "rod": stand_in("rod", Pos(0, 0, 2.5) * Box(58, 10, 3))}
+    default = passage(items, ["tray"], min_clearance=0.4)
+    assert default["status"] == "fail"
+    assert "it ends inside an opening" in default["message"]
+    result = passage(items, ["tray"], min_clearance=0.4, ends_inside=True)
+    assert result["status"] == "pass", result["message"]
+    assert result["measured"]["aperture"]["tray"] == pytest.approx(4.0, abs=0.05)
+    # one end only 0.05 mm into its slot (x -28.05)
+    short = {**items, "rod": stand_in("rod", Pos(0.475, 0, 2.5) * Box(57.05, 10, 3))}
+    result = passage(short, ["tray"], min_clearance=0.4, ends_inside=True)
+    assert result["status"] == "fail"
+    assert result["message"].startswith("not found: rod doesn't pass through an opening of tray")
+
+
+def test_passage_ends_inside_wholly_inside_one_hole_fails():
+    # a rod (z -5..5) wholly inside a 20 mm tall block's hole: one opening run, entered from no face
+    block = Box(20, 20, 20) - Cylinder(3, 20)
+    items = {"block": stand_in("block", block), "rod": stand_in("rod", Cylinder(2, 10))}
+    result = passage(items, ["block"], ends_inside=True)
+    assert result["status"] == "fail"
+    assert "doesn't enter it from a face of the part" in result["message"]
+
+
 def test_passage_ends_inside_the_material_beside_the_slot_fails():
     # the bar (z 4.5..7.5) ends at the slanted wall's mid-plane, in the wall above the slot (z -2.5..2.5)
     items = {"wall": stand_in("wall", oblique_wall()), "rod": stand_in("rod", Pos(-15, 0, 6) * Box(30, 10, 3))}

@@ -119,6 +119,11 @@ def test_skipped_layout_interfaces_warn(row):
     assert result["warnings"] == [
         "layout row: 2 interfaces skipped (not in the exact subset); they are not checked"]
     result = {"warnings": []}
+    one = dataclasses.replace(assembly.layouts[0], interfaces=(clear34,))
+    assemble_model._stage_check(assembly, builder, items, [], [one], result)
+    assert result["warnings"] == [
+        "layout row: 1 interface skipped (not in the exact subset); it is not checked"]
+    result = {"warnings": []}
     assemble_model._stage_check(assembly, builder, items, [], [assembly.layouts[0]], result)
     assert result["warnings"] == []
 
