@@ -323,7 +323,8 @@ def _length(ranges):
     return total
 
 
-def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0, span=None, skip=()) -> HoleProbe:
+def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0, span=None, skip=(),
+                 wide=None) -> HoleProbe:
     """Find the hole (or edge notch) in shape that the axis through origin along direction passes through.
 
     The axis line must not cross any material. The depths along it are split into slabs at the shape's vertex
@@ -331,8 +332,8 @@ def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0
     (a closed, convex and empty inner wire, or material covering at least 200 degrees round a notch). Depths that
     don't qualify, such as beside a wall or in open space, are excluded rather than measured, and listed in
     `excluded`. The hole is found when the qualifying depths include one contiguous range at least
-    min(MIN_HOLE_DEPTH, the extent of material within search_r, less any skipped depths) long; offset, diameter, free_radius and depth_span
-    come from all the qualifying depths only. Where the free region around the axis runs past 1.9 x search_r, only
+    min(MIN_HOLE_DEPTH, the extent of material within search_r, less any skipped and wide depths) long; offset,
+    diameter, free_radius and depth_span come from all the qualifying depths only. Where the free region around the axis runs past 1.9 x search_r, only
     a convex, empty closed hole skips the notch cover test, so a long arc slot or a slot with a nick in its edge
     reports "not a hole" (it fails safe).
 
@@ -343,6 +344,10 @@ def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0
     skip=((lo, hi, reason), ...) are depth ranges excluded with that reason and not measured (e.g. where a nut sits
     in its pocket); material there still blocks the axis. They don't apply when they would cover all the material
     within search_r: then that material is all the hole there is.
+
+    wide=(diameter, reason): qualifying depths whose hole is at least this wide (a nut's tunnel running on past the
+    nut) are excluded with that reason and not measured, and their length leaves the need like a skip's. This
+    doesn't apply when no qualifying depth would be left: then the wide hole is all the hole there is.
     """
     local = Plane(origin=origin, z_dir=direction).to_local_coords(shape)
     box = local.bounding_box()
@@ -376,10 +381,21 @@ def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0
                 return _not_found(span, 0, f"{result} at depth {z:.2f} mm along the axis")
             skipped = next((why for a, b, why in skip if a < z < b), None)
             owned.append((bounds[index], bounds[index + 1], skipped or (open_reason if result is None else result)))
-    runs = _runs(owned, keep={why for _, _, why in skip})
+    keep, tunnel = {why for _, _, why in skip}, []
+    if wide is not None:
+        narrow = [entry for entry in owned if isinstance(entry[2], tuple) and entry[2][1] < wide[0]]
+        tunnel = [(lo, hi, wide[1]) for lo, hi, result in owned if isinstance(result, tuple) and result[1] >= wide[0]]
+        if narrow and tunnel:
+            owned = [(lo, hi, wide[1]) if isinstance(result, tuple) and result[1] >= wide[0] else (lo, hi, result)
+                     for lo, hi, result in owned]
+            keep.add(wide[1])
+        else:
+            tunnel = []
+    runs = _runs(owned, keep=keep)
     excluded = tuple((lo, hi, reason) for lo, hi, reason, qualifies in runs if not qualifies)
     holes = [(lo, hi, samples) for lo, hi, samples, qualifies in runs if qualifies]
-    need = min(MIN_HOLE_DEPTH, span[1] - span[0] - _length(skip))  # what a skip leaves is all there is to measure
+    # what a skip (or a wide tunnel) leaves is all there is to measure
+    need = min(MIN_HOLE_DEPTH, span[1] - span[0] - _length(skip) - _length(tunnel))
     longest = max((hi - lo for lo, hi, _ in holes), default=0.0)
     if longest < need - RAY_TOL:
         where = "; ".join(f"{reason} at depths {lo:.2f} to {hi:.2f} mm" for lo, hi, reason in excluded)
@@ -519,7 +535,7 @@ def _ends_in_opening(local, clipped, end, inward, part_range, search_r):
     return not any(hi - lo > RAY_TOL and _encloses(_shadow(clipped, lo, hi, search_r)) for lo, hi in (below, above))
 
 
-def passage_opening(shape, origin, direction, *, search_r: float, extent) -> OpeningProbe:
+def passage_opening(shape, origin, direction, *, search_r: float, extent, ends_inside: bool = False) -> OpeningProbe:
     """Find an opening of shape that the stand-in on the line through origin along direction, over depths
     extent = (lo, hi) along it, passes through.
 
@@ -536,6 +552,13 @@ def passage_opening(shape, origin, direction, *, search_r: float, extent) -> Ope
       cover) applied to the shadow, and the shadow's largest inscribed circle contains the line.
     Measuring the shadow, not single sections, is what finds a slot in a wall oblique to the line: no single
     section there closes round the line. Material beyond the stand-in's extent (a box's far wall) doesn't count.
+
+    ends_inside=True: a stand-in that ends inside an opening (as _ends_in_opening finds it) may end there, provided
+    the range's other end lies within its extent: it entered the opening from that face of the body. The line must
+    cross no material from that face to the stand-in's end, and the shadow from that face to search_r past the end
+    (the opening across the end) must enclose the line. A stand-in that ends inside an opening at both ends of a
+    range (it never entered it) still fails, and so does one that ends before an opening (that is no opening
+    across its end).
     """
     local = Plane(origin=origin, z_dir=direction).to_local_coords(shape)
     box = local.bounding_box()
@@ -554,13 +577,13 @@ def passage_opening(shape, origin, direction, *, search_r: float, extent) -> Ope
     e0, e1 = extent
     reasons = []
     for body, clipped, near in bodies:
-        probe = _body_opening(body, clipped, near, whole, (e0, e1), search_r, reasons)
+        probe = _body_opening(body, clipped, near, whole, (e0, e1), search_r, reasons, ends_inside)
         if probe is not None:
             return probe
     return OpeningProbe(False, (math.nan, math.nan), math.nan, math.nan, "; ".join(reasons) or missing.reason)
 
 
-def _body_opening(local, clipped, near, whole, extent, search_r, reasons):
+def _body_opening(local, clipped, near, whole, extent, search_r, reasons, ends_inside=False):
     """passage_opening for one body (local, clipped to the search reach, and its near pieces): the OpeningProbe of
     its first range that is an opening, or None (adding why not to `reasons`). `whole` is all of the part, clipped:
     any of its material on the line blocks."""
@@ -573,19 +596,24 @@ def _body_opening(local, clipped, near, whole, extent, search_r, reasons):
             continue
         ends = [(end, inward) for end, inward, runs_on in ((e0, 1, a < e0 - RAY_TOL), (e1, -1, b > e1 + RAY_TOL))
                 if runs_on]
-        inside = next((end for end, inward in ends
-                       if _ends_in_opening(local, clipped, end, inward, (a, b), search_r)), None)
-        if inside is not None:
-            reasons.append(f"it ends inside an opening at {inside:.2f} mm along its line ({where})")
+        inside = [(end, inward) for end, inward in ends
+                  if _ends_in_opening(local, clipped, end, inward, (a, b), search_r)]
+        if inside and not (ends_inside and len(ends) == 1):  # with ends_inside: entered from the range's other end
+            entry = " and doesn't enter it from a face of the part" if ends_inside else ""
+            reasons.append(f"it ends inside an opening at {inside[0][0]:.2f} mm along its line{entry} ({where})")
             continue
         crossings = [w for w in _line_hits(whole, (0, 0, 0), (0, 0, 1)) if lo + RAY_TOL < w < hi - RAY_TOL]
         if crossings:
             reasons.append(f"blocked: material on its line at {crossings[0]:.2f} mm along it")
             continue
-        result = _shadow(clipped, lo, hi, search_r)
+        seen = (lo, hi)
+        if inside:  # the opening runs across the end: see it out to search_r past the end
+            end, inward = inside[0]
+            seen = (lo, min(b, end + search_r)) if inward < 0 else (max(a, end - search_r), hi)
+        result = _shadow(clipped, *seen, search_r)
         if _encloses(result):
             return OpeningProbe(True, (lo, hi), result[0], result[1])
         why = "no wall near the line" if result is None else (
             result if isinstance(result, str) else "the opening's widest circle doesn't contain the line")
-        reasons.append(f"{why}, seen along the line from {lo:.2f} to {hi:.2f} mm")
+        reasons.append(f"{why}, seen along the line from {seen[0]:.2f} to {seen[1]:.2f} mm")
     return None

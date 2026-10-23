@@ -397,7 +397,7 @@ def _check_variants(layout, unit_items, units, builder):
         for name, params in variants.items():
             decl = items[name].decl
             items[name] = builder.item(dataclasses.replace(decl, params={**decl.params, **params}))
-        results = {iface.name: ac.check_interface(iface, items) for iface in unit.interfaces}
+        results = {iface.name: ac.check_interface(iface, items, unit.interfaces) for iface in unit.interfaces}
         interfaces += [_in_instance(r, inst, loc) for r in results.values()]
         targets += [_in_instance(ac.check_target(t, items), inst, loc) for t in unit.targets]
         intended |= {frozenset(f"{inst}.{n}" for n in pair) for pair in ac.intended_overlaps(unit.interfaces, results)}
@@ -443,7 +443,7 @@ def check_layout(layout, unit_items, builder=None, *, units) -> dict:
                           f"add {', '.join(missing)} to exact to check it",
             })
             continue
-        results[iface.name] = {**ac.check_interface(iface, placed), "instance": None}
+        results[iface.name] = {**ac.check_interface(iface, placed, layout.interfaces), "instance": None}
 
     for inst in layout.overrides:
         if inst not in exact:
@@ -503,7 +503,7 @@ def check_unit(unit, items) -> dict:
     """Check one unit: its interfaces, then the overlap sweep (the snap results decide intended pairs), then targets."""
     import assembly_checks as ac
 
-    results = {iface.name: ac.check_interface(iface, items) for iface in unit.interfaces}
+    results = {iface.name: ac.check_interface(iface, items, unit.interfaces) for iface in unit.interfaces}
     intended = ac.intended_overlaps(unit.interfaces, results)
     return {
         "name": unit.name,

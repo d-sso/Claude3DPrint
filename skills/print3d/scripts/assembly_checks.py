@@ -12,8 +12,9 @@ Bolted holes are looked for only within the screw's extent (t from the tip to 0)
 hole's floor, a part further down the axis) neither blocks the screw nor counts as its hole. A thread or insert
 part's hole must start at least ENGAGE_PITCHES x pitch before the tip; in a thread part only depths where the hole is
 narrower than the screw's major diameter (the pilot) count. A nut must sit on the shank, and the depths where it sits
-are not measured as any part's hole (that is its pocket, checked by NutPocket). A declared washer takes the head's
-seat (head on washer, washer on the part) and is left out of the shank's overlap check.
+are not measured as any part's hole (that is its pocket, checked by NutPocket); nor, in the part holding it, are the
+depths where the hole is its tunnel (at least the nut's across-flats - TUNNEL_TOL wide). A declared washer takes the
+head's seat (head on washer, washer on the part) and is left out of the shank's overlap check.
 
 Snaps are measured in 2D, in the snap plane's own frame: u across (perpendicular to insert_dir in the plane), v along
 the pull-out direction (-insert_dir), both from the declared point. Only material within SNAP_WINDOW of the point
@@ -22,7 +23,8 @@ meets the catch's while it is pulled out; the running clearance is measured with
 
 A passage's stand-in is taken as straight: its run line goes through its bounding-box centre along the declared
 direction (or its longest bounding-box axis). In each part, one opening the line passes through must lie within the
-stand-in's extent (assembly_geometry.passage_opening), else "not found".
+stand-in's extent (assembly_geometry.passage_opening), else "not found". With ends_inside the stand-in may end
+inside an opening it entered from a face of the part.
 
 overlap_sweep(items, intended) reports every overlapping pair not in `intended` (see intended_overlaps), and
 check_target(target, items) measures one intent target; a target without a value fails with "no target:".
@@ -43,6 +45,8 @@ from print3d_assembly import Bolted, Clear, Gap, NutPocket, Passage, Position, S
 HEAD_RAYS = 12  # rays round the axis that find the surface under a head
 FLUSH_REACH = 0.5  # mm, a countersunk head's rim surface is probed this far outside the head
 PARALLEL_TOL = 1.0  # degrees, a nut axis within this of the screw axis counts as parallel
+TUNNEL_TOL = 0.1  # mm, a hole at least the nut's across-flats less this, in the part holding the nut, is its tunnel
+NUT_HOLD = 1.0  # mm, with no NutPocket declared, a through part with material this near the nut's corners holds it
 ENGAGE_PITCHES = 2.0  # a thread or insert part's hole must reach at least this many pitches past its start
 SNAP_STEP = 0.05  # mm, the bump part is pulled out of its catch in steps this long
 SNAP_WINDOW = 3.0  # mm, snap sections count within this of the point (across, and along beyond the travel)
@@ -90,10 +94,15 @@ def _sorted_failures(failures):
     return [f for f in failures if f.startswith("not found:")] + [f for f in failures if not f.startswith("not found:")]
 
 
-def check_interface(iface, items) -> dict:
-    """Check one declared interface on the placed items {name: PlacedItem}."""
-    checks = {Bolted: _check_bolted, NutPocket: _check_nut_pocket, Snap: _check_snap, Seat: _check_seat,
-              Passage: _check_passage, Clear: _check_clear}
+def check_interface(iface, items, interfaces=None) -> dict:
+    """Check one declared interface on the placed items {name: PlacedItem}.
+
+    interfaces: all the interfaces declared with it (a Bolted looks for the NutPocket of its nut), or None.
+    """
+    if isinstance(iface, Bolted):
+        return _check_bolted(iface, items, interfaces)
+    checks = {NutPocket: _check_nut_pocket, Snap: _check_snap, Seat: _check_seat, Passage: _check_passage,
+              Clear: _check_clear}
     return checks[type(iface)](iface, items)
 
 
@@ -180,7 +189,25 @@ def _nut_skip(iface, items, axis_o, axis_d, limit):
     return ((*span, "not measured: the nut sits here"),)
 
 
-def _check_bolted(iface, items):
+def _nut_tunnel(iface, items, interfaces, skip, axis_o, axis_d):
+    """The parts holding a coaxial nut ({name}) and the hole_on_axis `wide` that leaves their nut tunnel unmeasured:
+    the parts of the NutPockets declared for the nut, or, with none declared, the through parts with material
+    within NUT_HOLD of the nut's corners at its depths."""
+    if not skip:
+        return set(), None
+    decl = items[iface.nut].decl
+    s = print3d_profile.ISO4032_AF[decl.size]
+    wide = (s - TUNNEL_TOL, "not measured: the nut's tunnel")
+    pockets = {i.part for i in interfaces or () if isinstance(i, NutPocket) and i.nut == iface.nut}
+    if pockets:
+        return pockets, wide
+    t_lo, t_hi, _ = skip[0]
+    reach = Solid.make_cylinder(s / math.cos(math.radians(30)) / 2 + NUT_HOLD, t_hi - t_lo,
+                                Plane(origin=tuple(axis_o + axis_d * t_lo), z_dir=tuple(axis_d)))
+    return {name for name, _ in iface.through if ag.overlap(reach, items[name].shape)[0] > 0}, wide
+
+
+def _check_bolted(iface, items, interfaces=None):
     screw = items[iface.screw]
     decl = screw.decl
     fast = hardware.fastener(decl.size, decl.kind, decl.length)
@@ -198,9 +225,11 @@ def _check_bolted(iface, items):
     first_hole = None
     shank_span = (fast.tip, 0.0)  # only the screw's own extent along the axis counts: tip to seating plane
     skip = _nut_skip(iface, items, axis_o, axis_d, limit)
+    holders, tunnel = _nut_tunnel(iface, items, interfaces, skip, axis_o, axis_d)
     for name, role in iface.through:
         search_r = bolt_search_r(decl.size, role)
-        found = ag.hole_on_axis(items[name].shape, origin, direction, search_r=search_r, span=shank_span, skip=skip)
+        found = ag.hole_on_axis(items[name].shape, origin, direction, search_r=search_r, span=shank_span, skip=skip,
+                                wide=tunnel if name in holders else None)
         measured["search_r"][name] = _num(search_r)
         measured["offset"][name] = _num(found.offset) if found.found else None
         measured["diameter"][name] = _num(found.diameter) if found.found else None
@@ -650,7 +679,8 @@ def _check_passage(iface, items):
             measured["overlap_mm3"][name] = measured["clearance"][name] = None
             measured["opening"][name] = measured["aperture"][name] = None
             continue
-        opening = ag.passage_opening(part, centre, direction, search_r=search_r, extent=extent)
+        opening = ag.passage_opening(part, centre, direction, search_r=search_r, extent=extent,
+                                     ends_inside=iface.ends_inside)
         measured["opening"][name] = [_num(v) for v in opening.span] if opening.found else None
         measured["aperture"][name] = _num(opening.diameter) if opening.found else None
         if not opening.found:

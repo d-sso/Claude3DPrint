@@ -332,6 +332,53 @@ def test_passage_separate_bodies_never_make_one_opening():
     assert fused["status"] == "pass", fused["message"]  # one connected body: a real ring round the rod
     assert fused["measured"]["opening"]["part"] == pytest.approx([0.0, 4.0], abs=1e-3)
 
+
+# --- passage: ends_inside ----------------------------------------------------------------------------------------
+
+
+def test_passage_ends_inside_a_slanted_slot_opt_in():
+    # the bar runs x -30..0: it ends at the slanted wall's mid-plane, half way into the slot
+    items = {"wall": stand_in("wall", oblique_wall()), "rod": stand_in("rod", Pos(-15, 0, 0) * Box(30, 10, 3))}
+    default = passage(items, ["wall"])
+    assert default["status"] == "fail"
+    assert "it ends inside an opening" in default["message"]
+    result = passage(items, ["wall"], ends_inside=True)
+    assert result["status"] == "pass", result["message"]
+    assert result["measured"]["aperture"]["wall"] == pytest.approx(5.0, abs=0.05)
+    assert result["measured"]["clearance"]["wall"] > 0.5
+
+
+def test_passage_ends_inside_still_needs_to_reach_the_opening():
+    # a holed plate (z -1.5..1.5) and, in the same body, a wall beside the rod's line (x 2.5..4.5, up to z 10): the
+    # rod stops 1 mm above the plate, beside the wall, before the hole
+    body = plate_with_hole() + Pos(3.5, 0, 5.75) * Box(2, 20, 8.5)
+    rod = Pos(0, 0, 12.5) * Cylinder(2, 20)  # z 2.5..22.5
+    items = {"plate": stand_in("plate", body), "rod": stand_in("rod", rod)}
+    result = passage(items, ["plate"], min_clearance=0.4, ends_inside=True)
+    assert result["status"] == "fail"
+    assert result["message"].startswith("not found: rod doesn't pass through an opening of plate")
+    # a bare holed plate, the rod ending 1 mm above it
+    items = {"plate": stand_in("plate", plate_with_hole()), "rod": stand_in("rod", rod)}
+    result = passage(items, ["plate"], ends_inside=True)
+    assert result["status"] == "fail"
+    assert result["message"].startswith("not found:")
+
+
+def test_passage_ends_inside_the_material_beside_the_slot_fails():
+    # the bar (z 4.5..7.5) ends at the slanted wall's mid-plane, in the wall above the slot (z -2.5..2.5)
+    items = {"wall": stand_in("wall", oblique_wall()), "rod": stand_in("rod", Pos(-15, 0, 6) * Box(30, 10, 3))}
+    result = passage(items, ["wall"], ends_inside=True)
+    assert result["status"] == "fail"
+    assert "rod overlaps wall by" in result["message"]
+
+
+def test_passage_ends_inside_validated():
+    assert pa.Passage("p", "rod", ["plate"], 0.5, source="test").ends_inside is False
+    assert pa.Passage("p", "rod", ["plate"], 0.5, source="test", ends_inside=True).ends_inside is True
+    for bad in ("yes", 1, None):
+        with pytest.raises(ValueError, match="ends_inside"):
+            pa.Passage("p", "rod", ["plate"], 0.5, source="test", ends_inside=bad)
+
 # --- clear and step -----------------------------------------------------------------------------------------------
 
 

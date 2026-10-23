@@ -432,6 +432,8 @@ class Passage:
     at least `min_clearance`.
 
     `direction` is the stand-in's run direction; None: its longest bounding-box axis.
+    `ends_inside=True` lets the stand-in end inside an opening of a part it entered from one of that part's faces
+    (a strip cut to end in a slanted wall's slot); by default an end inside an opening fails.
     """
 
     name: str
@@ -440,6 +442,7 @@ class Passage:
     min_clearance: float
     _: KW_ONLY
     direction: tuple | None = None
+    ends_inside: bool = False
     source: str
     limit: float | None = None
 
@@ -449,6 +452,8 @@ class Passage:
         self.through = _names(self, "through")
         self.min_clearance = _num_field(self, "min_clearance", nonneg=True)
         self.direction = _vec(self, "direction", unit=True, optional=True)
+        if not isinstance(self.ends_inside, bool):
+            raise ValueError(f"{_where(self, 'ends_inside')} must be True or False, got {self.ends_inside!r}")
         _source(self)
         _limit(self)
 

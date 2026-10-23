@@ -476,6 +476,43 @@ def test_off_centre_nut_tunnel_not_counted_in_hole_offset():
     assert bare["measured"]["offset"]["block"] == pytest.approx(0.12, abs=0.02)
 
 
+def tunnel_joint(hole_dx=0.0, tunnel_top=2.4):
+    """An M3x12 (tip at z -2) down through a block (z -3..10): a clearance hole hole_dx off the axis and a hex tunnel
+    0.12 off-centre from z -3 up to tunnel_top; the nut sits in the tunnel at z 0..2.4."""
+    block = (Pos(0, 0, -3) * Box(20, 20, 13, align=MIN_Z) - Pos(hole_dx, 0, -3) * Cylinder(1.8, 13, align=MIN_Z)
+             - hex_prism(5.8, tunnel_top + 3, z0=-3, dx=0.12))
+    screw = pa.Screw("screw", "M3", "socket", 12.0, origin=(0, 0, 10), direction=(0, 0, 1))
+    nut = pa.Nut("nut", "M3", "hex", origin=(0, 0, 0), direction=(0, 0, 1))
+    items = {"block": stand_in("block", block), "screw": assemble_model.place_simple(screw),
+             "nut": assemble_model.place_simple(nut)}
+    return items, pa.Bolted("j", "screw", [("block", "clearance")], nut="nut", source="test")
+
+
+@pytest.mark.parametrize("tunnel_top", [2.4, 5.4])  # past the nut on the tip side; on both sides
+def test_nut_tunnel_past_the_nut_not_counted_in_hole_offset(tunnel_top):
+    items, bolt = tunnel_joint(tunnel_top=tunnel_top)
+    result = ac.check_interface(bolt, items)
+    assert result["status"] == "pass", result["message"]
+    assert result["measured"]["offset"]["block"] <= 0.02
+    assert any("tunnel" in why for _, _, why in result["measured"]["excluded"]["block"])
+    # the clearance hole beyond the tunnel is still measured
+    off_items, off_bolt = tunnel_joint(hole_dx=0.3, tunnel_top=tunnel_top)
+    result = ac.check_interface(off_bolt, off_items)
+    assert result["status"] == "fail"
+    assert "block: hole offset 0.3 mm from the screw axis" in result["message"]
+
+
+def test_nut_tunnel_only_in_the_nut_pocket_part():
+    items, bolt = tunnel_joint()
+    pocket = pa.NutPocket("pocket", "nut", "block", source="test")
+    assert ac.check_interface(bolt, items, [bolt, pocket])["status"] == "pass"
+    # a NutPocket that puts the nut in another part: the block's tunnel is measured as its hole
+    elsewhere = pa.NutPocket("pocket", "nut", "other", source="test")
+    result = ac.check_interface(bolt, items, [bolt, elsewhere])
+    assert result["status"] == "fail"
+    assert result["measured"]["offset"]["block"] == pytest.approx(0.12, abs=0.02)
+
+
 def nut_trap_joint(trap, hole_dx=0.0):
     """An M3x12 through a 7 mm top part (z 3..10) into a nut trap part; the nut at z 0..2.4."""
     top = Pos(0, 0, 3) * Box(20, 20, 7, align=MIN_Z) - Cylinder(1.8, 10, align=MIN_Z)
