@@ -249,3 +249,41 @@ def test_summary_counts_interface_skips_only():
     group = {"interfaces": [], "overlaps": [], "targets": [],
              "skipped": [{"name": "clear-34", "type": "clear"}, {"name": "c3", "type": "instance"}]}
     assert assemble_model._summary([group])["interfaces"]["skipped"] == 1
+
+
+def test_filtered_run_keeps_other_groups_sheets(capsys, tmp_path):
+    out = tmp_path / "out"
+    manifest = out / "assembly" / ".print3d-sheets.json"
+    code, data = assemble(capsys, ROW / "assembly.py", "--out", out)
+    assert code == 0, data["error"]
+    layout_sheets = data["layouts"][0]["sheets"]["overview"]
+    unit_sheet = data["units"][0]["sheets"]["overview"]
+    assert Path(layout_sheets).is_file()
+    listed = json.loads(manifest.read_text(encoding="utf-8"))["groups"]
+    assert set(listed) == {"unit:cell", "layout:row"}
+
+    code, data = assemble(capsys, ROW / "assembly.py", "--out", out, "--unit", "cell")
+    assert code == 0, data["error"]
+    assert Path(layout_sheets).is_file() and Path(unit_sheet).is_file()  # the unit's were rewritten
+    assert json.loads(manifest.read_text(encoding="utf-8"))["groups"] == listed
+    assert not any("stale" in w for w in data["warnings"])
+
+    code, data = assemble(capsys, ROW / "assembly.py", "--out", out, "--layout", "row", "--no-sheets")
+    assert code == 0, data["error"]
+    assert Path(unit_sheet).is_file() and not Path(layout_sheets).exists()  # the layout's cleared, the unit's kept
+    assert set(json.loads(manifest.read_text(encoding="utf-8"))["groups"]) == {"unit:cell"}
+
+
+def test_empty_assembly_passes_with_warning(capsys, tmp_path):
+    project = tmp_path / "empty"
+    project.mkdir()
+    (project / "assembly.py").write_text(
+        "from print3d_assembly import Assembly\n\n\ndef build_assembly(a):\n    return Assembly(units=[])\n",
+        encoding="utf-8")
+    code, data = assemble(capsys, project / "assembly.py", "--out", tmp_path / "out")
+    assert code == 0, data["error"]
+    assert data["ok"] is True and data["status"] == "pass"
+    assert data["summary"] == {"interfaces": {"pass": 0, "fail": 0, "skipped": 0}, "overlaps": 0,
+                               "targets": {"pass": 0, "fail": 0}}
+    assert data["units"] == [] and data["layouts"] == []
+    assert "no units or layouts declared" in data["warnings"]

@@ -822,7 +822,7 @@ def check_target(target, items) -> dict:
     """Measure one intent target (Size, Gap, Step, Position) on the placed items and compare it with its target.
 
     The keys of an interface result, with `measured` the measured number in mm (None when not found), `value` and
-    `tol` the target value and its tolerance. `expected` is the value, or {"min", "max"} for a bounded target
+    `tol` the target value and its tolerance (None for a bounded target). `expected` is the value, or {"min", "max"} for a bounded target
     (passes iff min <= measured <= max; an open end is None).
     """
     measure = {Size: _measure_size, Gap: _measure_gap, Step: _measure_step, Position: _measure_position}
@@ -854,5 +854,5 @@ def check_target(target, items) -> dict:
         expected = target.value
         passed = f"measured {_fmt(value or 0)} mm, target {_fmt(target.value or 0)} +/- {_fmt(target.tol)}"
     result = _result(target, names, failures, _num(value), expected, location, [], passed)
-    result.update(value=target.value, tol=target.tol)
+    result.update(value=target.value, tol=None if bounded else target.tol)
     return result

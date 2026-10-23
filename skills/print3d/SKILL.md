@@ -114,3 +114,4 @@ Use this for projects whose parts mate with each other or with hardware. Read `r
 4. Never take an expected value from the model being checked. A failing target is a finding: raise it, never adjust the target to match the model.
 5. Record confirmed document conflicts in `Assembly(notes=[...])` so they appear in `warnings`.
 6. Run `print3d assemble`, and review every evidence sheet before hand-off, describing what it shows.
+7. A project may mark its root with `assembly.py` before it declares units: `Assembly(units=[])` passes with a warning. `--unit`/`--layout` runs keep the other groups' sheets. `run`/`check` warn when a shared name does not come from `shared()`.

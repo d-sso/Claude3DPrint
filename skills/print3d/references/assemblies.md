@@ -39,13 +39,15 @@ The project root is the nearest folder above a model that contains `assembly.py`
 ## Shared values
 - A value that more than one part depends on is defined **once** in `interfaces.py`: `INTERFACES = {"wall": 2.0,  # mm, box wall}`.
 - A part takes it with `shared(...)` as its `PARAMETERS` defaults, **under the same name**:
-  `from print3d_shared import shared`, then `PARAMETERS = {**shared("wall", "box_x"), "bump_h": 0.5}`. It can still be `--set` for that part alone.
+  `from print3d_shared import shared`, then `PARAMETERS = {**shared("wall", "box_x"), "bump_h": 0.5}`. It can still be `--set` for that part alone; `shared` in a `run`/`check`/`assemble` result then reports the value the part was built with (after a `--set`, an assemble `--set`, or a Part/Layout param override).
+- A parameter that has a shared name but doesn't take its default from `shared()` makes `run`, `check` and `assemble` warn: `assemble --set` won't change it.
 - Derived values (`inner = box_x - 2 * wall`) are computed in `build()` (or a function), never stored, so they follow an override.
 - Moving existing parts onto `interfaces.py` may rename or remove part parameters, as long as the part's geometry, checks and `bbox_mm` stay the same. Update docstrings and `--set` examples.
 - `print3d assemble --set name=value` accepts only `INTERFACES` names and the assembly's own `PARAMETERS`; the value changes in every part using it. Anything else is a params error.
 
 ## The declaration
 `assembly.py` defines `PARAMETERS` (optional) and `build_assembly(a)`, which returns `Assembly(units, layouts=[], notes=[])`.
+`Assembly(units=[])` is valid: a project can mark its root with an `assembly.py` before any unit is declared. `assemble` then passes with zero counts and the warning "no units or layouts declared".
 Every field is validated when the object is made, so a typo fails at its line. Positions are (x, y, z) mm in the unit frame (layout frame for layout items).
 Working examples: `tests/fixtures/assembly/boxlid/` (unit) and `row/` (layout) in the repo; `templates/assembly_template.py` here.
 
@@ -100,11 +102,11 @@ Clear("battery-clear", "battery", "base", min_distance=1.0, source=SRC)
 - `Position(name, item, origin, direction, value, source=)`: where a probe first hits the item.
 - A bound instead of a value: `value=None` with `min=` and/or `max=` (mm), e.g.
   `Gap("battery-gap", "battery", "base", None, None, min=2.5, source=SRC)`. It passes iff min <= measured <= max
-  (no tolerance; an open end is unbounded) and `expected` is `{"min": .., "max": ..}`. Give either `value` (with `tol`) or bounds, never both.
+  (no tolerance, `tol` is reported as `null`; the bounds are compared exactly, so a measured 2.4999 mm fails `min=2.5`; an open end is unbounded) and `expected` is `{"min": .., "max": ..}`. Give either `value` (with `tol`) or bounds, never both.
 - No value and no bounds fails as "no target".
 
 ### Patterns
-Repeated hardware and joints are declared once and copied with `repeat(template, locations, name="{name}-{i}")`:
+Repeated hardware and joints are declared once and copied with `repeat(template, locations)`. Each copy is named `"{name}-{i}"` (the template's name plus the index), unless the template's own name has a placeholder (`"bolt-{i}"`), which is used as is:
 ```python
 from print3d_assembly import linear, polar, repeat
 
@@ -118,19 +120,20 @@ targets += repeat(Gap("edge-{i}", "c{i}.tile", "frame", None, None, min=2.5, sou
 - Each copy is the template moved by one Location: points (`origin`, `point`, `origin_a`/`origin_b`) move,
   directions and normals (`direction`, `normal`, `insert_dir`) only turn, a `Part`/`StandIn` `at` becomes `loc * at`,
   and a `Size` axis turns with the rotation (it must stay X, Y or Z).
-- Names: `name` may use `{name}` (the template's name) and `{i}` (0-based index); a template name containing `{i}` is used as is.
+- Names: `name` (default `"{name}-{i}"`) may use `{name}` (the template's name) and `{i}` (the index, **counting from 0**: `screw-0`, `c0`); a template name containing `{i}` is used as is.
   A reference to another item (`screw`, `nut`, `through`, `a`, `b`, `item`, `bump`, `catch`, `items`, `part`) containing `{i}`
   gets the same index; one without it is shared by every copy (`"tray"` above). Any other `{...}` is an error.
+- The instance names a template references (`"c{i}.tile"`) must match the ones the Layout declares: instances named `c0`..`c3` (as in "Layouts" below), not `c1`..`c4`.
 - Copies are validated like hand-written declarations; the result is a plain list, so use it in any `Unit` or `Layout` list.
 
 ### Layouts
 ```python
 cell = Unit("cell", [Part("block", "parts/block/block.py")])
-row = Layout("row", [(f"c{k + 1}", "cell", place(x=k * 20)) for k in range(4)],
+row = Layout("row", [(f"c{k}", "cell", place(x=k * 20)) for k in range(4)],  # instances c0..c3
              items=[StandIn("strip", Box(80, 10, 3), at=place(x=30, z=5))],
-             interfaces=[Passage("strip", "strip", [f"c{k + 1}.block" for k in range(4)], 0.4, source=SRC)],
-             targets=[Gap("seam-12", "c1.block", "c2.block", None, 0.4, source=SRC)],
-             exact=("c1", "c2"), overrides={"c2": {"block": {"variant": True}}})
+             interfaces=[Passage("strip", "strip", [f"c{k}.block" for k in range(4)], 0.4, source=SRC)],
+             targets=[Gap("seam-01", "c0.block", "c1.block", None, 0.4, source=SRC)],
+             exact=("c0", "c1"), overrides={"c1": {"block": {"variant": True}}})
 Assembly([cell], [row], notes=[...])
 ```
 - Inside a layout, `"<instance>.<item>"` names an item of a unit instance; a bare name is a layout item. Item names contain no `.`.
@@ -141,6 +144,7 @@ Assembly([cell], [row], notes=[...])
 ## Running
 `print3d assemble <assembly.py> [--set k=v ...] [--level unit|layout|all] [--unit NAME] [--layout NAME] [--strict] [--out DIR] [--no-sheets] [--profile NAME]`. `--profile` picks the printer profile whose `screw_clearance` and `insert_hole` values the checks use.
 Exit codes: 0 ok (checks may still fail), 1 error, 2 usage, 3 failing checks under `--strict`.
+`--unit` / `--layout` / `--level` check, and rewrite the sheets of, only the groups they select; the sheets of the other declared groups stay and stay listed in the manifest.
 
 ## Reading the result
 `out/assembly.result.json`: `ok`, `error`, `status` ("pass"/"fail"), `summary` (interface pass/fail/skipped counts, overlaps, targets), `warnings` (declared notes, sheet problems), `units[]` and `layouts[]`.
@@ -176,4 +180,4 @@ PNGs in `out/assembly/<unit or layout>/<check>.png`, plus one overview per unit 
 
 The sheet is drawn from the geometry that was measured. If it doesn't show the feature the message describes, the check isn't measuring what you think.
 
-`out/assembly/` is managed through `out/assembly/.print3d-sheets.json`: each run deletes only the sheets that file lists, then rewrites it. Without the manifest nothing is deleted and `warnings` says sheets there may be stale. Old PNGs can remain, so use only the paths in the latest result.
+`out/assembly/` is managed through `out/assembly/.print3d-sheets.json`: it lists the sheets per group (`unit:<name>`, `layout:<name>`). Each run deletes only the sheets that file lists for the groups it renders (and for groups no longer declared), then rewrites it; a filtered run (`--unit`, `--layout`, `--level`) keeps the other declared groups' sheets and entries. Without the manifest nothing is deleted and `warnings` says sheets there may be stale. Old PNGs can remain, so use only the paths in the latest result.

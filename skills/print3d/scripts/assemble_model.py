@@ -208,13 +208,8 @@ class Builder:
         return self.modules[path]
 
     def _shared_warnings(self, decl, module):
-        from_shared = getattr(module, "__print3d_shared__", {})
-        for key, value in module.PARAMETERS.items():
-            if key in self.interfaces and (key not in from_shared or from_shared[key] != value):
-                self._warn(
-                    f"Part '{decl.name}' ({decl.model}): parameter '{key}' has a shared name but does not "
-                    "come from shared(); assemble --set won't change it"
-                )
+        for text in run_model.shared_param_warnings(module, self.interfaces, f"Part '{decl.name}' ({decl.model})"):
+            self._warn(text)
 
     def _build(self, decl, path, module, params):
         key = (path, tuple(sorted(params.items())))
@@ -262,7 +257,7 @@ class Builder:
             self._shared_warnings(decl, module)
             params = _check_part_params(decl, module.PARAMETERS)
             shape = self._select(decl, path, self._build(decl, path, module, params))
-            shared = dict(getattr(module, "__print3d_shared__", {}))
+            shared = run_model.used_shared(getattr(module, "__print3d_shared__", {}), params)
             return PlacedItem(decl.name, "part", shape.moved(decl.at), decl.color, path.as_posix(), shared, decl, decl.at)
         return place_simple(decl)
 
@@ -640,12 +635,27 @@ def _prune_empty(folder, root):
         folder.rmdir()
 
 
-def clear_sheets(out, result):
+def _group_key(kind, name):
+    return f"{kind}:{name}"
+
+
+def _read_manifest(manifest):
+    """{group key: [relative file, ...]} from a manifest; an old flat one ("files" only) is one group, "*"."""
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    groups = data.get("groups")
+    if isinstance(groups, dict):
+        return {str(k): list(v) for k, v in groups.items()}
+    return {"*": list(data["files"])}
+
+
+def clear_sheets(out, result, keep=()):
     """Remove the sheets an earlier run wrote, so none sits next to this result. Never deletes anything else.
 
-    Only the files listed in out/assembly/.print3d-sheets.json (written by stage_sheets) go, if they resolve to a
-    PNG inside out/assembly/; then the manifest and the folders left empty. Without a manifest nothing is deleted
-    and a warning says the sheets there may be stale. Any failure is a warning.
+    Only the files listed in out/assembly/.print3d-sheets.json (written by stage_sheets, per group "unit:<name>" /
+    "layout:<name>") go, if they resolve to a PNG inside out/assembly/. The groups named in `keep` (declared but not
+    rendered by this run, e.g. under --unit / --layout) keep their files and their manifest entries; for the others
+    the files go, and when nothing is kept the manifest and the folders left empty go too. Without a manifest
+    nothing is deleted and a warning says the sheets there may be stale. Any failure is a warning.
     """
     folder = out / SHEET_DIR
     if not folder.is_dir():
@@ -657,28 +667,50 @@ def clear_sheets(out, result):
         result["warnings"].append(f"Not cleared: {stale}")
         return
     try:
-        listed = json.loads(manifest.read_text(encoding="utf-8"))["files"]
-        for rel in listed:
-            path = root / rel
-            if (isinstance(rel, str) and path.suffix.lower() == ".png" and _inside(path, root)
-                    and path.is_file() and not path.is_symlink()):
-                path.unlink()
-        manifest.unlink()
+        groups = _read_manifest(manifest)
+        kept = {key: files for key, files in groups.items() if key in keep}
+        for key, listed in groups.items():
+            if key in kept:
+                continue
+            for rel in listed:
+                path = root / rel
+                if (isinstance(rel, str) and path.suffix.lower() == ".png" and _inside(path, root)
+                        and path.is_file() and not path.is_symlink()):
+                    path.unlink()
+        if kept:
+            manifest.write_text(json.dumps(_manifest_data(kept), indent=2), encoding="utf-8")
+        else:
+            manifest.unlink()
         _prune_empty(root, root)
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         result["warnings"].append(f"Could not clear the old sheets ({type(exc).__name__}: {exc}): {stale}")
 
 
+def _manifest_data(groups):
+    return {"files": sorted({f for files in groups.values() for f in files}),
+            "groups": {key: sorted(files) for key, files in sorted(groups.items())}}
+
+
 def _write_manifest(result, out):
-    """List every sheet this run wrote, relative to out/assembly/, so the next run can remove exactly those."""
+    """List every sheet this run wrote, per group, relative to out/assembly/, so a later run removes exactly those.
+
+    The groups the run did not render stay as clear_sheets left them in the manifest.
+    """
     root = (out / SHEET_DIR).resolve()
-    paths = [p for g in result["units"] + result["layouts"] for e in g["interfaces"] + g["overlaps"]
-             for p in e.get("evidence", [])] + [p for g in result["units"] + result["layouts"]
-                                                 for p in g["sheets"].values()]
-    files = sorted({Path(p).resolve().relative_to(root).as_posix() for p in paths if _inside(p, root)})
+    manifest = root / SHEET_MANIFEST
+    try:
+        groups = _read_manifest(manifest) if manifest.is_file() else {}
+        groups.pop("*", None)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        groups = {}
+    for kind, entries in (("unit", result["units"]), ("layout", result["layouts"])):
+        for g in entries:
+            paths = [p for e in g["interfaces"] + g["overlaps"] for p in e.get("evidence", [])] + list(g["sheets"].values())
+            groups[_group_key(kind, g["name"])] = sorted(
+                {Path(p).resolve().relative_to(root).as_posix() for p in paths if _inside(p, root)})
     try:
         root.mkdir(parents=True, exist_ok=True)
-        (root / SHEET_MANIFEST).write_text(json.dumps({"files": files}, indent=2), encoding="utf-8")
+        manifest.write_text(json.dumps(_manifest_data(groups), indent=2), encoding="utf-8")
     except OSError as exc:
         result["warnings"].append(f"Could not write the sheet list {SHEET_MANIFEST}: {exc}")
 
@@ -727,6 +759,8 @@ def _stage_load(path, set_pairs, result):
     result["parameters"] = dict(params)
     result["overrides"] = {**shared_overrides, **{k: params[k] for k in raw if k not in shared_overrides}}
     result["warnings"] += [note for note in assembly.notes if note not in result["warnings"]]
+    if not assembly.units and not assembly.layouts:
+        result["warnings"].append("no units or layouts declared")
     return assembly, shared_overrides
 
 
@@ -761,7 +795,8 @@ def assemble(path, set_pairs=(), level="all", unit=None, layout=None, out_dir=No
     dict (None: the default base profile). out_dir: default `out` next to assembly.py; sheets go in
     out/assembly/<unit or layout>/<check>.png. Before building, the sheets the previous run listed in
     out/assembly/.print3d-sheets.json are removed (also with sheets=False, and when the run then fails), so none
-    sits next to a newer result; nothing else is ever deleted (see clear_sheets). Exit codes: 0 ok (also with failing checks), 1 error, 2 usage,
+    sits next to a newer result (with --unit / --layout / --level only those of the groups it renders; the others
+    stay listed); nothing else is ever deleted (see clear_sheets). Exit codes: 0 ok (also with failing checks), 1 error, 2 usage,
     3 failing checks with strict.
     """
     path = Path(path).resolve()
@@ -793,7 +828,11 @@ def assemble(path, set_pairs=(), level="all", unit=None, layout=None, out_dir=No
         unit_list = _select("unit", {u.name: u for u in assembly.units}, unit) if check_units else []
         layout_list = _select("layout", {lay.name: lay for lay in assembly.layouts}, layout) if check_layouts else []
 
-        clear_sheets(out, result)  # first, and also with --no-sheets: no stale evidence next to this result
+        rendered = {_group_key("unit", u.name) for u in unit_list} | {_group_key("layout", lay.name) for lay in layout_list}
+        declared = {_group_key("unit", u.name) for u in assembly.units} | {_group_key("layout", lay.name) for lay in assembly.layouts}
+        # first, and also with --no-sheets: no stale evidence next to this result; a filtered run keeps the
+        # sheets of the declared groups it doesn't render
+        clear_sheets(out, result, keep=declared - rendered)
         stage = "build"
         builder = Builder(path.parent, shared_overrides, result)
         result["shared"] = {**builder.interfaces, **shared_overrides}

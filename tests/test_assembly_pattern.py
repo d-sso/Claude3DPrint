@@ -244,6 +244,7 @@ def test_min_and_max_target(boxlid):
     result = ac.check_target(bounded, items)
     assert result["status"] == "pass", result["message"]
     assert result["expected"] == {"min": 22.5, "max": 23.5}
+    assert result["tol"] is None and result["value"] is None
     assert "22.5" in result["message"] and "23.5" in result["message"]
     result = ac.check_target(dataclasses.replace(bounded, min=23.5, max=24.0), items)
     assert result["status"] == "fail"

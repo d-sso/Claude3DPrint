@@ -150,6 +150,34 @@ def load_model(path, shared_overrides=None):
     return module
 
 
+def used_shared(shared_values, params):
+    """The shared() values as the part was built with them: a parameter of the same name (after --set or a
+    Part/Layout override) wins over the value shared() handed out at load."""
+    return {name: params.get(name, value) for name, value in shared_values.items()}
+
+
+def shared_param_warnings(module, interfaces, label):
+    """Warnings for PARAMETERS that carry a shared name but don't take their default from shared()."""
+    from_shared = getattr(module, "__print3d_shared__", {})
+    return [
+        f"{label}: parameter '{key}' has a shared name but does not come from shared(); "
+        "assemble --set won't change it"
+        for key, value in module.PARAMETERS.items()
+        if key in interfaces and (key not in from_shared or from_shared[key] != value)
+    ]
+
+
+def _project_interfaces(model_path):
+    """INTERFACES of the project around a model, or {} outside a project or when interfaces.py doesn't load."""
+    root = print3d_shared.find_project_root(model_path)
+    if root is None or not (root / "interfaces.py").is_file():
+        return {}
+    try:
+        return print3d_shared.load_interfaces(root)
+    except ValueError:
+        return {}
+
+
 def normalize_parts(built):
     """Return {name: shape} from whatever build() returned, or raise a build-stage RunError."""
     from build123d import Compound, Part, Solid
@@ -541,10 +569,15 @@ def run(
 
         stage = "load"
         module = _timed(result, "load", stage_load, model_path)
-        result["shared"] = dict(getattr(module, "__print3d_shared__", {}))
+        shared_loaded = dict(getattr(module, "__print3d_shared__", {}))
+        result["shared"] = shared_loaded
 
         stage = "params"
         params = stage_params(module, raw, result)
+        result["shared"] = used_shared(shared_loaded, params)
+        for text in shared_param_warnings(module, _project_interfaces(model_path),
+                                          f"Part '{model_path.stem}' ({model_path.name})"):
+            result["warnings"].append(text)
         if check:
             thresholds, sources = resolve_checks(module, config_checks, raw_checks, profile)
 

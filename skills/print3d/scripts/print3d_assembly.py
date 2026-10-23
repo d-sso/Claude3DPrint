@@ -746,8 +746,6 @@ class Assembly:
 
     def __post_init__(self):
         self.units = _typed_list(self, "units", (Unit,), "units")
-        if not self.units:
-            raise ValueError("Assembly: units must hold at least one Unit")
         self.layouts = _typed_list(self, "layouts", (Layout,), "layouts")
         if isinstance(self.notes, str) or not all(isinstance(n, str) for n in self.notes):
             raise ValueError(f"Assembly: notes must be a list of strings, got {self.notes!r}")
