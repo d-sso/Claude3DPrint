@@ -639,13 +639,25 @@ def _group_key(kind, name):
     return f"{kind}:{name}"
 
 
-def _read_manifest(manifest):
-    """{group key: [relative file, ...]} from a manifest; an old flat one ("files" only) is one group, "*"."""
+def _read_manifest(manifest, result=None):
+    """{group key: [relative file, ...]} from a manifest; an old flat one ("files" only) is one group, "*".
+
+    Only string entries are kept and a group that isn't a list is dropped; a drop adds a warning to `result`.
+    """
     data = json.loads(manifest.read_text(encoding="utf-8"))
     groups = data.get("groups")
-    if isinstance(groups, dict):
-        return {str(k): list(v) for k, v in groups.items()}
-    return {"*": list(data["files"])}
+    if not isinstance(groups, dict):
+        groups = {"*": data["files"]}
+    clean, dropped = {}, False
+    for key, files in groups.items():
+        if not isinstance(files, list):
+            dropped = True
+            continue
+        clean[str(key)] = [f for f in files if isinstance(f, str)]
+        dropped = dropped or len(clean[str(key)]) != len(files)
+    if dropped and result is not None:
+        result["warnings"].append(f"Ignored malformed entries in the sheet list {SHEET_MANIFEST}")
+    return clean
 
 
 def clear_sheets(out, result, keep=()):
@@ -667,7 +679,7 @@ def clear_sheets(out, result, keep=()):
         result["warnings"].append(f"Not cleared: {stale}")
         return
     try:
-        groups = _read_manifest(manifest)
+        groups = _read_manifest(manifest, result)
         kept = {key: files for key, files in groups.items() if key in keep}
         for key, listed in groups.items():
             if key in kept:
@@ -711,11 +723,11 @@ def _write_manifest(result, out):
     try:
         root.mkdir(parents=True, exist_ok=True)
         manifest.write_text(json.dumps(_manifest_data(groups), indent=2), encoding="utf-8")
-    except OSError as exc:
+    except (OSError, ValueError, TypeError) as exc:
         result["warnings"].append(f"Could not write the sheet list {SHEET_MANIFEST}: {exc}")
 
 
-def stage_sheets(result, unit_items, layout_items, layouts, out):
+def stage_sheets(result, unit_items, layout_items, layouts, out, declared=()):
     """Render every evidence sheet into out/assembly/; as run's preview, a failure is only a warning."""
     try:
         import assembly_sheets  # noqa: F401
@@ -725,16 +737,21 @@ def stage_sheets(result, unit_items, layout_items, layouts, out):
             "Re-run skills/print3d/scripts/setup.ps1 to update the print3d environment."
         )
         return
-    folders = _Stems()
+    stems = _Stems()
+    folder_of = {}
+    for kind, name in [*declared, *(("unit", g["name"]) for g in result["units"]),
+                       *(("layout", g["name"]) for g in result["layouts"])]:
+        if (kind, name) not in folder_of:  # every declared group in declaration order: a folder is the same in any run
+            folder_of[(kind, name)] = stems(name)
     root = out / SHEET_DIR
     for group in result["units"]:
-        _group_sheets(group, "unit", unit_items[group["name"]], root / folders(group["name"]),
+        _group_sheets(group, "unit", unit_items[group["name"]], root / folder_of[("unit", group["name"])],
                       f"Unit {group['name']}", (), result)
     for group in result["layouts"]:
         layout = layouts[group["name"]]
         exact = ", ".join(layout.exact) or "none"
         highlight = tuple(layout.exact) + tuple(decl.name for decl in layout.items)
-        _group_sheets(group, "layout", layout_items[group["name"]], root / folders(group["name"]),
+        _group_sheets(group, "layout", layout_items[group["name"]], root / folder_of[("layout", group["name"])],
                       f"Layout {group['name']}  ·  {group['instances']} instances, exact: {exact}", highlight, result)
     _write_manifest(result, out)
 
@@ -849,7 +866,8 @@ def assemble(path, set_pairs=(), level="all", unit=None, layout=None, out_dir=No
         if sheets:
             stage = "sheets"
             layouts = {lay.name: lay for lay in layout_list}
-            _timed(result, "sheets", stage_sheets, result, unit_items, layout_items, layouts, out)
+            _timed(result, "sheets", stage_sheets, result, unit_items, layout_items, layouts, out,
+                   [("unit", u.name) for u in assembly.units] + [("layout", lay.name) for lay in assembly.layouts])
         result["ok"] = True
     except RunError as err:
         result["error"] = run_model.error_info(err, error_model)

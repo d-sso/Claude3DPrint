@@ -287,3 +287,38 @@ def test_empty_assembly_passes_with_warning(capsys, tmp_path):
                                "targets": {"pass": 0, "fail": 0}}
     assert data["units"] == [] and data["layouts"] == []
     assert "no units or layouts declared" in data["warnings"]
+
+
+def test_malformed_manifest_is_a_warning(capsys, tmp_path):
+    out = tmp_path / "out"
+    code, data = assemble(capsys, ROW / "assembly.py", "--out", out)
+    assert code == 0, data["error"]
+    layout_sheet = Path(data["layouts"][0]["sheets"]["overview"])
+    manifest = out / "assembly" / ".print3d-sheets.json"
+    manifest.write_text(json.dumps({"groups": {"layout:row": [1, layout_sheet.relative_to(out / "assembly").as_posix()],
+                                               "unit:cell": "oops"}}), encoding="utf-8")
+    code, data = assemble(capsys, ROW / "assembly.py", "--out", out, "--unit", "cell")
+    assert code == 0 and data["ok"], data["error"]
+    assert any("malformed" in w for w in data["warnings"])
+    assert layout_sheet.is_file()
+    groups = json.loads(manifest.read_text(encoding="utf-8"))["groups"]
+    assert groups["layout:row"] == [layout_sheet.relative_to(out / "assembly").as_posix()]
+
+
+def test_filtered_run_keeps_folder_of_colliding_group_names(capsys, tmp_path):
+    project = copy_project(ROW, tmp_path)
+    text = (project / "assembly.py").read_text(encoding="utf-8")
+    assert 'Layout(\n        "row"' in text
+    (project / "assembly.py").write_text(text.replace('Layout(\n        "row"', 'Layout(\n        "cell"'),
+                                         encoding="utf-8")
+    out = tmp_path / "out"
+    code, data = assemble(capsys, project / "assembly.py", "--out", out)
+    assert code == 0, data["error"]
+    unit_sheet = Path(data["units"][0]["sheets"]["overview"])
+    layout_sheet = Path(data["layouts"][0]["sheets"]["overview"])
+    assert unit_sheet.parent != layout_sheet.parent
+    before = unit_sheet.read_bytes()
+    code, data = assemble(capsys, project / "assembly.py", "--out", out, "--layout", "cell")
+    assert code == 0, data["error"]
+    assert Path(data["layouts"][0]["sheets"]["overview"]) == layout_sheet
+    assert unit_sheet.read_bytes() == before
