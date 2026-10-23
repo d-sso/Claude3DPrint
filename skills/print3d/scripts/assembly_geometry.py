@@ -161,14 +161,18 @@ def _inside(points, segments):
     return np.count_nonzero(straddles & (px < x_cross), axis=1) % 2 == 1
 
 
+def _angle_gaps(points, centre):
+    """The angular gaps (degrees) between the points (at least 2), seen round centre."""
+    angles = np.sort(np.degrees(np.arctan2(points[:, 1] - centre[1], points[:, 0] - centre[0])))
+    return np.diff(np.append(angles, angles[0] + 360.0))
+
+
 def _enclosed(centre, radius, walls, tree):
     """True when the wall points touching this circle surround it (no gap wider than MAX_CONTACT_GAP)."""
     touching = walls[tree.query_ball_point(centre, radius + CONTACT_SLACK)]
     if len(touching) < 2:
         return False
-    angles = np.sort(np.degrees(np.arctan2(touching[:, 1] - centre[1], touching[:, 0] - centre[0])))
-    gaps = np.diff(np.append(angles, angles[0] + 360.0))
-    return gaps.max() <= MAX_CONTACT_GAP
+    return _angle_gaps(touching, centre).max() <= MAX_CONTACT_GAP
 
 
 def _covered(centre, radius, walls, tree):
@@ -176,8 +180,7 @@ def _covered(centre, radius, walls, tree):
     near = walls[tree.query_ball_point(centre, NOTCH_REACH * radius)]
     if len(near) < 2:
         return 0.0
-    angles = np.sort(np.degrees(np.arctan2(near[:, 1] - centre[1], near[:, 0] - centre[0])))
-    gaps = np.diff(np.append(angles, angles[0] + 360.0))
+    gaps = _angle_gaps(near, centre)
     return 360.0 - gaps[gaps > COVER_BREAK].sum()
 
 
@@ -565,14 +568,38 @@ def _entry(local, clipped, end, inward, part_range, search_r, limit=MIN_HOLE_DEP
     return limit
 
 
+def _one_sided(clipped, z, search_r):
+    """True when the material of the section at z within search_r of the axis (the reach) lies on one side of it
+    only: none at all, or the largest angular gap round the axis between its outline points (the outline of the
+    material clipped to the reach, arcs included) is at least 180 degrees. Walls on opposite sides (a bore crossed
+    by a transverse hole narrower than the reach) aren't."""
+    faces = _section(clipped, z)
+    if not faces:
+        return True
+    region = Face(Wire.make_circle(search_r, Plane.XY.offset(z)))
+    inside = [face for piece in faces for cut in _pieces(piece.intersect(region)) for face in cut.faces()]
+    edges = [edge for face in inside for edge in face.edges()]
+    if not edges:
+        return True
+    points = np.concatenate([_discretise(edge) for edge in edges])
+    return len(points) < 2 or _angle_gaps(points, (0.0, 0.0)).max() >= 180.0
+
+
+def _leaves(clipped, lo, hi, search_r):
+    """True when the line leaves the body's material somewhere between depths lo and hi: one slab's section there
+    (sampled at its middle) is _one_sided."""
+    return any(_one_sided(clipped, (s0 + s1) / 2, search_r) for s0, s1 in _slabs(clipped, lo, hi))
+
+
 def _ends_in_two_runs(local, clipped, extent, part_range, search_r, hits, where, reasons):
     """ends_inside with the body's material running on past both ends of the stand-in, each end inside an opening:
-    an OpeningProbe when the ends sit in two different opening runs (a section between them doesn't enclose the
-    axis) and each is entered by min(MIN_HOLE_DEPTH, half its run), else None (adding why not to `reasons`). Each
+    an OpeningProbe when the ends sit in two different opening runs (the line leaves the material between them: a
+    section there has its material within search_r on one side of the axis only, see _one_sided) and each
+    is entered by min(MIN_HOLE_DEPTH, half its run), else None (adding why not to `reasons`). Each
     end's shadow, from search_r on its body side to search_r past it (or the first material on the line past it),
     must enclose the axis; the result has the largest offset and the smallest diameter of the two."""
     (e0, e1), (a, b) = extent, part_range
-    if all(_encloses(_hole_at_depth(local, clipped, (s0 + s1) / 2, search_r)) for s0, s1 in _slabs(clipped, e0, e1)):
+    if not _leaves(clipped, e0, e1, search_r):
         reasons.append(f"it ends inside an opening at {e0:.2f} mm along its line and doesn't enter it from a face of "
                        f"the part ({where})")
         return None
@@ -586,7 +613,7 @@ def _ends_in_two_runs(local, clipped, extent, part_range, search_r, hits, where,
             return None
     crossings = [w for w in hits if e0 + RAY_TOL < w < e1 - RAY_TOL]
     if crossings:
-        reasons.append(f"blocked: material on its line at {crossings[0]:.2f} mm along it")
+        reasons.append(f"blocked: material on its line at {crossings[0]:.2f} mm along it ({where})")
         return None
     results = []
     for seen in ((max([a, e0 - search_r, *(w for w in hits if w < e0 + RAY_TOL)]), min(e1, e0 + search_r)),

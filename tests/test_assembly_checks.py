@@ -435,6 +435,50 @@ def test_passage_ends_inside_wholly_inside_one_hole_fails():
     assert "doesn't enter it from a face of the part" in result["message"]
 
 
+@pytest.mark.parametrize("cross_r, rod_h", [(2.5, 20), (3.5, 20), (2.5, 8.5)])
+def test_ends_inside_cross_drilled_bore_rejected(cross_r, rod_h):
+    # a rod wholly inside a 3 mm radius bore, crossed at z 0 by a hole along x narrower than the reach (4.33 mm): the
+    # walls stay on both sides of the line there, so it is still one opening run
+    from build123d import Rot
+
+    block = Box(30, 30, 40) - Cylinder(3, 40) - Rot(0, 90, 0) * Cylinder(cross_r, 40)
+    items = {"block": stand_in("block", block), "rod": stand_in("rod", Cylinder(2, rod_h))}
+    result = passage(items, ["block"], ends_inside=True)
+    assert result["status"] == "fail"
+    assert "doesn't enter it from a face of the part" in result["message"]
+
+
+def test_ends_inside_cross_hole_wider_than_the_reach_is_a_known_generous_pass():
+    # a cross hole of radius 5 leaves no material within the reach (4.33 mm): documented in assemblies.md
+    from build123d import Rot
+
+    block = Box(30, 30, 40) - Cylinder(3, 40) - Rot(0, 90, 0) * Cylinder(5, 40)
+    items = {"block": stand_in("block", block), "rod": stand_in("rod", Cylinder(2, 20))}
+    assert passage(items, ["block"], ends_inside=True)["status"] == "pass"
+
+
+def test_passage_ends_inside_tray_with_side_walls():
+    # the two-slot tray with side walls 3 mm beside the strip (y +-8..+-10): they are beyond its reach (6.62 mm)
+    body = Pos(0, 0, -1) * Box(60, 20, 2)
+    for x in (-29, 29):
+        body += Pos(x, 0, 5) * Box(2, 20, 10) - Pos(x, 0, 2.5) * Box(2, 12, 4)
+    for y in (-9, 9):
+        body += Pos(0, y, 5) * Box(60, 2, 10)
+    items = {"tray": stand_in("tray", body), "rod": stand_in("rod", Pos(0, 0, 2.5) * Box(58, 10, 3))}
+    result = passage(items, ["tray"], min_clearance=0.4, ends_inside=True)
+    assert result["status"] == "pass", result["message"]
+
+
+def test_passage_ends_inside_strip_resting_on_the_floor_between_slots():
+    # the strip (z 0..3) lies on the tray floor between the two slotted walls; slots z 0..4
+    tray_ = Pos(0, 0, -1) * Box(60, 20, 2)
+    for x in (-29, 29):
+        tray_ += Pos(x, 0, 5) * Box(2, 20, 10) - Pos(x, 0, 2) * Box(2, 12, 4)
+    items = {"tray": stand_in("tray", tray_), "rod": stand_in("rod", Pos(0, 0, 1.5) * Box(58, 10, 3))}
+    result = passage(items, ["tray"], min_clearance=0.0, ends_inside=True)
+    assert result["status"] == "pass", result["message"]
+
+
 def test_passage_ends_inside_the_material_beside_the_slot_fails():
     # the bar (z 4.5..7.5) ends at the slanted wall's mid-plane, in the wall above the slot (z -2.5..2.5)
     items = {"wall": stand_in("wall", oblique_wall()), "rod": stand_in("rod", Pos(-15, 0, 6) * Box(30, 10, 3))}
