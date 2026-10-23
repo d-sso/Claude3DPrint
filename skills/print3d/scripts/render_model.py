@@ -29,13 +29,19 @@ INFO_MAX_LINES = (PANEL - 2 * INFO_TOP) // INFO_LINE_H  # lines that fit in the 
 BACKGROUND = (255, 255, 255)
 PART_RGB = np.array([200, 204, 210], dtype=float)
 CUT_RGB = (240, 140, 40)
+SCENE_CUT_SHADE = 0.6  # render_scene: an item's cut faces are its colour times this
+OVERLAP_RGB = (255, 0, 0)  # render_scene: material cut in two items at once (a fault)
+ENGAGED_RGB = (0, 160, 170)  # render_scene: ... where the overlap is intended (a screw in its thread), hatched
+FAULT, ENGAGED = "fault", "engaged"  # render_scene overlaps= styles
+HATCH_PX = 3  # engaged overlap: diagonal stripes this wide, ENGAGED_RGB and white
+COINCIDENT_MM = 1e-3  # render_scene: surfaces of two items closer than this in depth count as one
 EDGE_RGB = (40, 40, 40)
 MARKER_RGB = (220, 30, 30)
 AXIS_RGB = {"X": (210, 40, 40), "Y": (30, 150, 50), "Z": (40, 80, 220)}
 TEXT_RGB = (20, 20, 20)
 GRID_RGB = (210, 210, 210)
 # Pillow's built-in font has no glyphs for these.
-ASCII_TEXT = str.maketrans({"×": "x", "²": "2", "³": "3"})
+ASCII_TEXT = str.maketrans({"×": "x", "²": "2", "³": "3", "§": "sect."})
 
 NAMED_VIEWS = {  # name: (direction the viewer looks along, screen up)
     "front": ((0, 1, 0), (0, 0, 1)),
@@ -101,6 +107,8 @@ class Render:
     center: tuple  # screen (x, y) in mm drawn at origin_px
     origin_px: tuple  # pixel position of `center`: the content box centre
     depth: np.ndarray | None = None  # (H, W) depth buffer in mm along forward, inf where empty
+    overlap: np.ndarray | None = None  # render_scene sections: (H, W) mask of fault overlap pixels (OVERLAP_RGB)
+    engaged: np.ndarray | None = None  # render_scene sections: (H, W) mask of intended overlap pixels (hatched)
 
     def project(self, points_mm):
         """(N, 3) model points (mm) -> (N, 2) pixel coordinates (x right, y down)."""
@@ -121,7 +129,18 @@ def preview_mesh(shape):
 
 def _corners(mesh):
     """The 8 bbox corners, or the origin for an empty mesh."""
-    return trimesh.bounds.corners(mesh.bounds) if len(mesh.vertices) else np.zeros((1, 3))
+    return _scene_corners([mesh])
+
+
+def _scene_corners(meshes):
+    """The 8 corners of the bbox around every non-empty mesh, or the origin when all are empty."""
+    bounds = [m.bounds for m in meshes if len(m.vertices)]
+    if not bounds:
+        return np.zeros((1, 3))
+    if len(bounds) == 1:
+        return trimesh.bounds.corners(bounds[0])
+    lo, hi = np.min([b[0] for b in bounds], axis=0), np.max([b[1] for b in bounds], axis=0)
+    return trimesh.bounds.corners(np.array([lo, hi]))
 
 
 def content_box(size):
@@ -131,9 +150,12 @@ def content_box(size):
 
 
 def fit_mm_per_px(mesh, views, size):
-    """The smallest mm/px at which the mesh's bbox fits the content box in every view (one shared scale)."""
+    """The smallest mm/px at which the mesh's bbox fits the content box in every view (one shared scale).
+
+    `mesh` may also be a list of meshes (a scene): their combined bbox is fitted.
+    """
     x0, y0, x1, y1 = content_box(size)
-    corners = _corners(mesh)
+    corners = _scene_corners(mesh if isinstance(mesh, (list, tuple)) else [mesh])
     scale = 0.0
     for view in views:
         right, up, _ = view.basis()
@@ -194,9 +216,60 @@ def _rasterize(xy, z, width, height, keep=None):
     return depth.reshape(height, width), face.reshape(height, width)
 
 
-def _edges(depth, face, normals, cut, mm_per_px):
-    """Pixels on silhouettes, depth jumps, sharp creases and cut outlines."""
+def _composite(xy, z, counts, facing, width, height, keep, section):
+    """Rasterize each item of a scene on its own and merge them. Returns (depth, face, first cut, second cut).
+
+    Per pixel the nearest item wins, unless it is nearer by no more than COINCIDENT_MM: then the earlier item keeps
+    it, so faces that coincide (a stand-in flush with a wall) don't z-fight into speckle. In a section, a pixel
+    inside an item's material at the plane (its nearest face beyond the plane is a back face) shows that item's cut
+    even where another item's surface lies at the same depth (a lid on a rim, a screw in a bore of its own size).
+    first / second cut: the index of the first and second item whose material is cut at each pixel (-1: none), so
+    a pixel with a second cut is material of two items at once.
+    """
+    depth = np.full((height, width), np.inf)
+    face = np.full((height, width), -1, dtype=np.int64)
+    is_cut = np.zeros((height, width), dtype=bool)
+    first = np.full((height, width), -1, dtype=np.int64)
+    second = np.full((height, width), -1, dtype=np.int64)
+    start = 0
+    for index, count in enumerate(counts):
+        d, f = _rasterize(xy[start:start + count], z[start:start + count], width, height, keep)
+        hit = f >= 0
+        f = np.where(hit, f + start, -1)
+        cut = hit & (facing[np.maximum(f, 0)] > 0) if section else np.zeros_like(hit)
+        second[cut & (first >= 0) & (second < 0)] = index
+        first[cut & (first < 0)] = index
+        nearer = d < depth - COINCIDENT_MM
+        take = np.where(cut, ~is_cut | nearer, ~is_cut & nearer)
+        depth[take], face[take], is_cut[take] = d[take], f[take], cut[take]
+        start += count
+    return depth, face, first, second
+
+
+def _overlap_masks(first, second, overlaps):
+    """(fault mask, engaged mask) of the pixels cut in two items, styled per pair (None: every pair is a fault)."""
+    both = second >= 0
+    if overlaps is None:
+        return both, np.zeros_like(both)
+    fault, engaged = np.zeros_like(both), np.zeros_like(both)
+    if both.any():
+        pairs = np.stack([first[both], second[both]], axis=1)
+        for a, b in np.unique(pairs, axis=0).tolist():
+            style = overlaps.get(frozenset((a, b)))
+            if style is None:
+                continue
+            mask = both & (first == a) & (second == b)
+            (engaged if style == ENGAGED else fault)[mask] = True
+    return fault, engaged
+
+
+def _edges(depth, face, normals, cut, mm_per_px, owner=None):
+    """Pixels on silhouettes, depth jumps, sharp creases and cut outlines (and, given `owner`, item boundaries).
+
+    owner: the item index of each face; where neighbouring pixels belong to different items an edge is drawn.
+    """
     filled = face >= 0
+    own = None if owner is None else np.where(filled, owner[np.maximum(face, 0)], -1)
     n = np.where(filled[..., None], normals[np.maximum(face, 0)], 0.0)
     z = np.where(filled, depth, 0.0)
     cos_sharp = math.cos(math.radians(SHARP_DEG))
@@ -209,6 +282,8 @@ def _edges(depth, face, normals, cut, mm_per_px):
         jump |= surface & (np.abs(z[a] - z[b]) > 4 * mm_per_px)
         jump |= surface & ((n[a] * n[b]).sum(axis=-1) < cos_sharp)
         jump |= both & (cut[a] != cut[b])
+        if own is not None:
+            jump |= both & (own[a] != own[b])
         edge[a] |= jump & filled[a]
         edge[b] |= jump & filled[b]
     return edge
@@ -218,36 +293,69 @@ def render(mesh, view=None, *, section=None, mm_per_px=None, size=(PANEL, PANEL)
     """Render one orthographic view of `mesh`, or a section viewed square-on. Returns a Render.
 
     markers: (point_mm, label) pairs, drawn filled when visible and hollow when hidden behind the part.
+    Exactly render_scene([(mesh, PART_RGB)], ...) with the cut faces in CUT_RGB.
     """
+    return _render([(mesh, PART_RGB)], view, section, mm_per_px, size, markers, None, CUT_RGB)
+
+
+def render_scene(items, view=None, *, section=None, mm_per_px=None, size=(PANEL, PANEL), markers=(), center=None,
+                 overlaps=None):
+    """Render several meshes, each shaded in its own colour: items = [(trimesh.Trimesh, (r, g, b)), ...].
+
+    As render(); a section draws each item's cut faces in a darker shade of its colour (SCENE_CUT_SHADE), and
+    boundaries between items draw an edge. Material cut in two items at once is styled per pair by `overlaps`
+    ({frozenset((i, j)): FAULT or ENGAGED}, item indices): FAULT in OVERLAP_RGB, ENGAGED hatched with ENGAGED_RGB,
+    pairs not listed unpainted. overlaps=None paints every pair as a fault. Render.overlap / .engaged are the masks.
+    center: a model point (mm) drawn at the panel centre (default: the centre of the scene's bbox).
+    """
+    return _render(items, view, section, mm_per_px, size, markers, center, None, overlaps)
+
+
+def _render(items, view, section, mm_per_px, size, markers, center_mm, cut_rgb, overlaps=None):
     if section is not None:
         view = section.view()
     elif view is None:
         raise ValueError("render() needs a view or a section")
+    meshes = [mesh for mesh, _ in items]
     right, up, forward = view.basis()
     width, height = size
     x0, y0, x1, y1 = content_box(size)
     if mm_per_px is None:
-        mm_per_px = fit_mm_per_px(mesh, [view], size)
-    corners = _corners(mesh)
-    sx, sy = corners @ right, corners @ up
-    center = (float(sx.min() + np.ptp(sx) / 2), float(sy.min() + np.ptp(sy) / 2))
+        mm_per_px = fit_mm_per_px(meshes, [view], size)
+    corners = _scene_corners(meshes)
+    if center_mm is None:
+        sx, sy = corners @ right, corners @ up
+        center = (float(sx.min() + np.ptp(sx) / 2), float(sy.min() + np.ptp(sy) / 2))
+    else:
+        point = np.asarray(center_mm, dtype=float)
+        center = (float(point @ right), float(point @ up))
     result = Render(None, float(mm_per_px), (right, up, forward), center, ((x0 + x1) / 2, (y0 + y1) / 2))
 
-    triangles = mesh.triangles
+    triangles = np.concatenate([m.triangles.reshape(-1, 3, 3) for m in meshes])
     xy = result.project(triangles.reshape(-1, 3)).reshape(-1, 3, 2)
     keep = None
     if section is not None:
         # A face lying on the plane is kept (seen as surface) at every pixel, not split by rounding into speckle.
         keep = float(np.asarray(section.point, dtype=float) @ forward) - 1e-6 * max(1.0, float(np.ptp(corners, axis=0).max()))
-    depth, face = _rasterize(xy, triangles @ forward, width, height, keep)
+    counts = [len(m.faces) for m in meshes]
+    normals = np.concatenate([m.face_normals.reshape(-1, 3) for m in meshes]) if len(triangles) else np.zeros((0, 3))
+    fault = engaged = None
+    if len(meshes) > 1:
+        depth, face, first, second = _composite(xy, triangles @ forward, counts, normals @ forward, width, height,
+                                                keep, section is not None)
+        fault, engaged = _overlap_masks(first, second, overlaps)
+    else:
+        depth, face = _rasterize(xy, triangles @ forward, width, height, keep)
+    result.overlap, result.engaged = fault, engaged
     result.depth = depth
-    if len(mesh.faces) == 0:  # nothing to draw: a blank panel (markers still drawn)
+    if len(triangles) == 0:  # nothing to draw: a blank panel (markers still drawn)
         result.image = Image.new("RGB", size, BACKGROUND)
         if markers:
             draw_markers(result, markers)
         return result
 
-    normals = mesh.face_normals
+    colors = np.repeat(np.array([np.asarray(rgb, dtype=float) for _, rgb in items]), counts, axis=0)
+    owner = np.repeat(np.arange(len(meshes)), counts) if len(meshes) > 1 else None
     facing = normals @ forward  # < 0: the face looks toward the viewer
     filled = face >= 0
     back = filled & (facing[np.maximum(face, 0)] > 0)
@@ -256,9 +364,15 @@ def render(mesh, view=None, *, section=None, mm_per_px=None, size=(PANEL, PANEL)
     light = _unit(-forward + 0.6 * up - 0.4 * right)  # from the viewer's upper left
     shade = np.where(facing > 0, 0.35, 0.45 + 0.55 * np.clip(normals @ light, 0, 1))  # back faces of open meshes: dark
     pixels = np.full((height, width, 3), BACKGROUND, dtype=float)
-    pixels[filled] = PART_RGB * shade[face[filled], None]
-    pixels[cut] = CUT_RGB
-    pixels[_edges(depth, face, normals, cut, mm_per_px)] = EDGE_RGB
+    pixels[filled] = colors[face[filled]] * shade[face[filled], None]
+    pixels[cut] = colors[face[cut]] * SCENE_CUT_SHADE if cut_rgb is None else cut_rgb
+    if fault is not None:
+        pixels[fault] = OVERLAP_RGB
+        rows, cols = np.indices((height, width))
+        stripe = ((rows + cols) // HATCH_PX) % 2 == 0
+        pixels[engaged & stripe] = ENGAGED_RGB
+        pixels[engaged & ~stripe] = BACKGROUND
+    pixels[_edges(depth, face, normals, cut, mm_per_px, owner)] = EDGE_RGB
     result.image = Image.fromarray(pixels.round().astype(np.uint8), "RGB")
     if markers:
         draw_markers(result, markers)

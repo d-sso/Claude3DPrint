@@ -1,0 +1,324 @@
+"""print3d assemble: the command, its result and exit codes, on the boxlid and row fixtures."""
+import json
+import shutil
+from pathlib import Path
+
+import pytest
+from conftest import FIXTURES
+
+import print3d
+
+BOXLID = FIXTURES / "assembly" / "boxlid"
+ROW = FIXTURES / "assembly" / "row"
+KEYS = {"ok", "model", "parameters", "overrides", "shared", "profile", "status", "summary", "units", "layouts",
+        "warnings", "timings_s", "error"}
+
+
+@pytest.fixture(autouse=True)
+def no_user_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("PRINT3D_CONFIG", str(tmp_path / "no-config.toml"))
+
+
+def assemble(capsys, *args):
+    code = print3d.main(["assemble", *map(str, args)])
+    return code, json.loads(capsys.readouterr().out)
+
+
+def copy_project(src, tmp_path):
+    dest = tmp_path / src.name
+    shutil.copytree(src, dest, ignore=shutil.ignore_patterns("__pycache__", "out"))
+    return dest
+
+
+def test_assemble_boxlid_cli(capsys, tmp_path):
+    out = tmp_path / "out"
+    code, data = assemble(capsys, BOXLID / "assembly.py", "--out", out)
+    assert code == 0, data["error"]
+    assert set(data) == KEYS
+    assert data["ok"] is True and data["status"] == "pass" and data["error"] is None
+    assert data["summary"] == {"interfaces": {"pass": 8, "fail": 0, "skipped": 0}, "overlaps": 0,
+                               "targets": {"pass": 2, "fail": 0}}
+    unit = data["units"][0]
+    assert unit["name"] == "box" and [p["name"] for p in unit["parts"]] == ["base", "lid"]
+    assert all(Path(p["model"]).is_file() for p in unit["parts"])
+    for result in unit["interfaces"]:
+        assert result["evidence"], result["name"]
+        assert all(Path(p).is_file() for p in result["evidence"])
+        assert Path(result["evidence"][0]).parent == (out / "assembly" / "box").resolve()
+    assert Path(unit["sheets"]["overview"]).is_file()
+    assert data["layouts"] == [] and data["parameters"] == {"screw_len": 12.0} and data["overrides"] == {}
+    assert data["shared"]["wall"] == 2.0 and data["profile"]["name"]
+    saved = json.loads((out / "assembly.result.json").read_text(encoding="utf-8"))
+    assert saved["status"] == "pass" and saved["units"][0]["sheets"] == unit["sheets"]
+
+
+def test_assemble_strict_fail_exit_3(capsys, tmp_path):
+    args = [BOXLID / "assembly.py", "--set", "screw_len=6", "--out", tmp_path, "--no-sheets"]
+    code, data = assemble(capsys, *args, "--strict")
+    assert code == 3 and data["ok"] is True and data["status"] == "fail"
+    assert data["overrides"] == {"screw_len": 6.0}
+    assert data["summary"]["interfaces"]["fail"] == 2
+    bolts = [r for r in data["units"][0]["interfaces"] if r["type"] == "bolted"]
+    assert all(r["status"] == "fail" and r["evidence"] == [] for r in bolts)
+    assert data["units"][0]["sheets"] == {}
+    code, data = assemble(capsys, *args)
+    assert code == 0 and data["status"] == "fail"
+
+
+def test_assemble_usage_errors(capsys, tmp_path):
+    code, data = assemble(capsys, tmp_path / "missing.py")
+    assert code == 2 and data["ok"] is False and data["error"]["stage"] == "usage"
+    code, data = assemble(capsys, BOXLID / "assembly.py", "--level", "bogus")
+    assert code == 2 and data["error"]["stage"] == "usage"
+    code, data = assemble(capsys, BOXLID / "assembly.py", "--unit", "nope", "--out", tmp_path)
+    assert code == 2 and "box" in data["error"]["message"]
+    code, data = assemble(capsys, BOXLID / "assembly.py", "--unit", "box", "--level", "layout")
+    assert code == 2
+    code, data = assemble(capsys, BOXLID / "assembly.py", "--set", "nope=1", "--out", tmp_path)
+    assert code == 1 and data["error"]["stage"] == "params"
+
+
+def test_assemble_notes_become_warnings(capsys, tmp_path):
+    project = copy_project(BOXLID, tmp_path)
+    path = project / "assembly.py"
+    text = path.read_text(encoding="utf-8")
+    old = 'return Assembly([Unit("box", items, interfaces, targets)])'
+    assert old in text
+    note = "fixture.md says the wall is 2.5 mm, interfaces.py has 2.0; the checks use 2.0"
+    path.write_text(text.replace(old, old[:-1] + f", notes=[{note!r}])"), encoding="utf-8")
+    code, data = assemble(capsys, path, "--no-sheets")
+    assert code == 0, data["error"]
+    assert note in data["warnings"]
+    assert (project / "out" / "assembly.result.json").is_file()  # out/ next to assembly.py by default
+
+
+def test_assemble_part_error_names_the_part(capsys, tmp_path):
+    project = copy_project(BOXLID, tmp_path)
+    lid = project / "parts" / "lid" / "lid.py"
+    lid.write_text(lid.read_text(encoding="utf-8").replace("def build(p):", "def build(p):\n    1 / 0"),
+                   encoding="utf-8")
+    code, data = assemble(capsys, project / "assembly.py", "--no-sheets")
+    assert code == 1 and data["ok"] is False and data["status"] is None
+    assert data["error"]["stage"] == "build" and "Part 'lid'" in data["error"]["message"]
+    assert any("lid.py" in line for line in data["error"]["traceback"])
+
+
+def test_assemble_level_filter(capsys, tmp_path):
+    code, data = assemble(capsys, ROW / "assembly.py", "--level", "unit", "--out", tmp_path)
+    assert code == 0, data["error"]
+    assert data["layouts"] == [] and [u["name"] for u in data["units"]] == ["cell"]
+    assert Path(data["units"][0]["sheets"]["overview"]).is_file()
+
+
+def test_assemble_row_layout(capsys, tmp_path):
+    code, data = assemble(capsys, ROW / "assembly.py", "--layout", "row", "--out", tmp_path)
+    assert code == 0, data["error"]
+    assert data["units"] == [] and data["status"] == "pass"
+    layout, = data["layouts"]
+    assert layout["name"] == "row" and layout["exact"] == ["c1", "c2"]
+    strip, = layout["interfaces"]
+    assert strip["status"] == "pass"
+    assert Path(strip["evidence"][0]).parent == (tmp_path / "assembly" / "row").resolve()
+    assert Path(layout["sheets"]["overview"]).is_file()
+    assert data["summary"]["targets"] == {"pass": 2, "fail": 0}
+
+
+def _png(path):
+    import numpy as np
+    from PIL import Image
+
+    with Image.open(path) as image:
+        return np.asarray(image.convert("RGB"))
+
+
+def _has(pixels, rgb):
+    import numpy as np
+
+    return bool(np.all(pixels == np.array(rgb, dtype=np.uint8), axis=-1).any())
+
+
+def test_offset_hole_overlap_sheet_shows_red(capsys, tmp_path):
+    import render_model
+
+    project = copy_project(BOXLID, tmp_path)
+    path = project / "assembly.py"
+    old = "at=place(z=top, rx=180), color"
+    text = path.read_text(encoding="utf-8")
+    assert old in text
+    path.write_text(text.replace(old, 'at=place(z=top, rx=180), params={"hole_dx": 0.5}, color'), encoding="utf-8")
+    code, data = assemble(capsys, path)
+    assert code == 0, data["error"]
+    overlap = next(o for o in data["units"][0]["overlaps"] if {o["a"], o["b"]} == {"lid", "screw-left"})
+    assert _has(_png(overlap["evidence"][0]), render_model.OVERLAP_RGB)
+    bolt = next(r for r in data["units"][0]["interfaces"] if r["name"] == "bolt-left")
+    assert _has(_png(bolt["evidence"][0]), render_model.OVERLAP_RGB)
+
+
+THREAD_PROJECT = (
+    "from build123d import Align, Box, Cylinder\n"
+    "from print3d_assembly import Assembly, Bolted, Screw, StandIn, Unit\n"
+    "\n"
+    "MIN_Z = (Align.CENTER, Align.CENTER, Align.MIN)\n"
+    "\n"
+    "\n"
+    "def build_assembly(a):\n"
+    "    block = Box(20, 20, 10, align=MIN_Z) - Cylinder(1.25, 10, align=MIN_Z)  # a 2.5 mm pilot for M3\n"
+    "    items = [StandIn('block', block, color=(200, 200, 200)),\n"
+    "             Screw('screw', 'M3', 'socket', 8.0, origin=(0, 0, 10), direction=(0, 0, 1))]\n"
+    "    joint = Bolted('j', 'screw', [('block', 'thread')], source='test')\n"
+    "    return Assembly([Unit('joint', items, [joint])])\n"
+)
+
+
+def test_thread_engagement_sheet_is_not_fault_red(capsys, tmp_path):
+    import render_model
+
+    project = tmp_path / "thread"
+    project.mkdir()
+    (project / "assembly.py").write_text(THREAD_PROJECT, encoding="utf-8")
+    code, data = assemble(capsys, project / "assembly.py")
+    assert code == 0, data["error"]
+    assert data["status"] == "pass" and data["units"][0]["overlaps"] == []
+    pixels = _png(data["units"][0]["interfaces"][0]["evidence"][0])
+    assert not _has(pixels, render_model.OVERLAP_RGB)
+    assert _has(pixels, render_model.ENGAGED_RGB)  # the hatch, and its legend swatch
+
+
+def test_stale_sheets_are_removed(capsys, tmp_path):
+    out = tmp_path / "out"
+    code, data = assemble(capsys, BOXLID / "assembly.py", "--out", out)  # an earlier run's sheets
+    assert code == 0 and (out / "assembly" / "box" / "bolt-left.png").is_file()
+    assert (out / "assembly" / ".print3d-sheets.json").is_file()
+    code, data = assemble(capsys, BOXLID / "assembly.py", "--out", out, "--no-sheets")
+    assert code == 0 and not (out / "assembly").exists()  # every listed sheet, the manifest, the empty folders
+    code, data = assemble(capsys, BOXLID / "assembly.py", "--out", out)
+    code, data = assemble(capsys, ROW / "assembly.py", "--out", out, "--level", "unit")
+    assert code == 0 and not (out / "assembly" / "box").exists()
+    assert (out / "assembly" / "cell" / "overview.png").is_file()
+
+
+def test_clear_keeps_user_files(capsys, tmp_path):
+    out = tmp_path / "out"
+    code, _ = assemble(capsys, BOXLID / "assembly.py", "--out", out)
+    assert code == 0
+    notes = out / "assembly" / "cad" / "notes.txt"
+    notes.parent.mkdir()
+    notes.write_text("mine", encoding="utf-8")
+    mine = out / "assembly" / "box" / "my-sketch.png"
+    mine.write_bytes(b"mine")
+    victim = tmp_path / "victim.png"  # a manifest entry that points out of the folder is never followed
+    victim.write_bytes(b"keep")
+    manifest = out / "assembly" / ".print3d-sheets.json"
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    data["files"].append("../../victim.png")
+    manifest.write_text(json.dumps(data), encoding="utf-8")
+    code, result = assemble(capsys, BOXLID / "assembly.py", "--out", out, "--no-sheets")
+    assert code == 0
+    assert notes.read_text(encoding="utf-8") == "mine" and mine.read_bytes() == b"mine" and victim.is_file()
+    assert not (out / "assembly" / "box" / "bolt-left.png").exists() and not manifest.exists()
+
+
+def test_clear_without_manifest_warns(capsys, tmp_path):
+    out = tmp_path / "out"
+    old = out / "assembly" / "box" / "old-check.png"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"old")
+    code, data = assemble(capsys, BOXLID / "assembly.py", "--out", out, "--no-sheets")
+    assert code == 0 and old.read_bytes() == b"old"
+    assert any("stale" in w and "assembly" in w for w in data["warnings"])
+
+
+def test_sunk_head_on_thread_part_is_red(capsys, tmp_path):
+    import render_model
+
+    project = tmp_path / "head"
+    project.mkdir()
+    text = THREAD_PROJECT.replace("origin=(0, 0, 10)", "origin=(0, 0, 9)")  # the head sinks 1 mm into the block
+    assert text != THREAD_PROJECT
+    (project / "assembly.py").write_text(text, encoding="utf-8")
+    code, data = assemble(capsys, project / "assembly.py")
+    assert code == 0, data["error"]
+    joint = data["units"][0]["interfaces"][0]
+    assert joint["status"] == "fail" and "head overlaps block" in joint["message"]
+    assert _has(_png(joint["evidence"][0]), render_model.OVERLAP_RGB)
+
+
+def test_summary_counts_interface_skips_only():
+    import assemble_model
+
+    group = {"interfaces": [], "overlaps": [], "targets": [],
+             "skipped": [{"name": "clear-34", "type": "clear"}, {"name": "c3", "type": "instance"}]}
+    assert assemble_model._summary([group])["interfaces"]["skipped"] == 1
+
+
+def test_filtered_run_keeps_other_groups_sheets(capsys, tmp_path):
+    out = tmp_path / "out"
+    manifest = out / "assembly" / ".print3d-sheets.json"
+    code, data = assemble(capsys, ROW / "assembly.py", "--out", out)
+    assert code == 0, data["error"]
+    layout_sheets = data["layouts"][0]["sheets"]["overview"]
+    unit_sheet = data["units"][0]["sheets"]["overview"]
+    assert Path(layout_sheets).is_file()
+    listed = json.loads(manifest.read_text(encoding="utf-8"))["groups"]
+    assert set(listed) == {"unit:cell", "layout:row"}
+
+    code, data = assemble(capsys, ROW / "assembly.py", "--out", out, "--unit", "cell")
+    assert code == 0, data["error"]
+    assert Path(layout_sheets).is_file() and Path(unit_sheet).is_file()  # the unit's were rewritten
+    assert json.loads(manifest.read_text(encoding="utf-8"))["groups"] == listed
+    assert not any("stale" in w for w in data["warnings"])
+
+    code, data = assemble(capsys, ROW / "assembly.py", "--out", out, "--layout", "row", "--no-sheets")
+    assert code == 0, data["error"]
+    assert Path(unit_sheet).is_file() and not Path(layout_sheets).exists()  # the layout's cleared, the unit's kept
+    assert set(json.loads(manifest.read_text(encoding="utf-8"))["groups"]) == {"unit:cell"}
+
+
+def test_empty_assembly_passes_with_warning(capsys, tmp_path):
+    project = tmp_path / "empty"
+    project.mkdir()
+    (project / "assembly.py").write_text(
+        "from print3d_assembly import Assembly\n\n\ndef build_assembly(a):\n    return Assembly(units=[])\n",
+        encoding="utf-8")
+    code, data = assemble(capsys, project / "assembly.py", "--out", tmp_path / "out")
+    assert code == 0, data["error"]
+    assert data["ok"] is True and data["status"] == "pass"
+    assert data["summary"] == {"interfaces": {"pass": 0, "fail": 0, "skipped": 0}, "overlaps": 0,
+                               "targets": {"pass": 0, "fail": 0}}
+    assert data["units"] == [] and data["layouts"] == []
+    assert "no units or layouts declared" in data["warnings"]
+
+
+def test_malformed_manifest_is_a_warning(capsys, tmp_path):
+    out = tmp_path / "out"
+    code, data = assemble(capsys, ROW / "assembly.py", "--out", out)
+    assert code == 0, data["error"]
+    layout_sheet = Path(data["layouts"][0]["sheets"]["overview"])
+    manifest = out / "assembly" / ".print3d-sheets.json"
+    manifest.write_text(json.dumps({"groups": {"layout:row": [1, layout_sheet.relative_to(out / "assembly").as_posix()],
+                                               "unit:cell": "oops"}}), encoding="utf-8")
+    code, data = assemble(capsys, ROW / "assembly.py", "--out", out, "--unit", "cell")
+    assert code == 0 and data["ok"], data["error"]
+    assert any("malformed" in w for w in data["warnings"])
+    assert layout_sheet.is_file()
+    groups = json.loads(manifest.read_text(encoding="utf-8"))["groups"]
+    assert groups["layout:row"] == [layout_sheet.relative_to(out / "assembly").as_posix()]
+
+
+def test_filtered_run_keeps_folder_of_colliding_group_names(capsys, tmp_path):
+    project = copy_project(ROW, tmp_path)
+    text = (project / "assembly.py").read_text(encoding="utf-8")
+    assert 'Layout(\n        "row"' in text
+    (project / "assembly.py").write_text(text.replace('Layout(\n        "row"', 'Layout(\n        "cell"'),
+                                         encoding="utf-8")
+    out = tmp_path / "out"
+    code, data = assemble(capsys, project / "assembly.py", "--out", out)
+    assert code == 0, data["error"]
+    unit_sheet = Path(data["units"][0]["sheets"]["overview"])
+    layout_sheet = Path(data["layouts"][0]["sheets"]["overview"])
+    assert unit_sheet.parent != layout_sheet.parent
+    before = unit_sheet.read_bytes()
+    code, data = assemble(capsys, project / "assembly.py", "--out", out, "--layout", "cell")
+    assert code == 0, data["error"]
+    assert Path(data["layouts"][0]["sheets"]["overview"]) == layout_sheet
+    assert unit_sheet.read_bytes() == before

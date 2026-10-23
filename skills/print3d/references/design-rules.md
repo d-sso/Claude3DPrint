@@ -92,3 +92,17 @@ with Locations(top):
 - The beam's **length** must lie in the XY plane (print the cantilever flat), so the bending stress runs along the layers.
   Never make a cantilever that stands vertically: it delaminates.
 - Expect PLA+ snaps to fatigue. Prefer screws for parts that are opened often.
+
+## 10. Fastener engagement
+The assembly checks (`print3d assemble`, `references/assemblies.md`) use these rules. Ask the user before relaxing one.
+- **Nyloc nut:** the screw tip must protrude at least 1 pitch past the nut's far face (the face away from the head), so the nylon ring is engaged. M3 pitch is 0.5 mm.
+- **Hex nut:** the tip must be at least flush with the far face (protrusion >= 0). Aim for 1 pitch.
+- **Thread or heat-set insert part:** the screw must engage at least 2 x pitch of the part's hole: the hole must start at least 2 x pitch before the screw tip.
+- **Thread part:** only the pilot engages, i.e. the depths where the hole is narrower than the screw's major diameter (M3: under 3.0 mm). A counterbore or clearance-size hole doesn't count.
+- The nut must sit on the shank, between the head's seating plane and the tip.
+- A bridge layer left over a nut pocket or hole blocks the screw: drill it through in the model.
+
+## 11. Snap engagement
+- Snap engagement is how far the bump reaches past the catch edge: the bump height minus the per-side running clearance.
+- A typical PLA+ skirt snap engages 0.3 to 0.8 mm. Less than 0.3 mm holds poorly; more than 0.8 mm risks cracking the skirt or making the lid hard to remove.
+- Declare the range in `Snap(engagement=(0.3, 0.8), ...)` with its source, and **test-fit** the first print: engagement depends on the printer's calibrated fits (`print3d calibrate`).

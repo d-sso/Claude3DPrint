@@ -290,3 +290,82 @@ def test_face_on_the_cut_plane_renders_without_speckle():
     assert not color_mask(r, CUT_RGB)[left].any() and not color_mask(r, EDGE_RGB)[left].any()
     (rx0, ry0), (rx1, ry1) = r.project([(1, 19, 10), (19, -19, 10)])  # the step, cut through
     assert color_mask(r, CUT_RGB)[int(ry0):int(ry1), int(rx0):int(rx1)].all()
+
+
+# --- scenes: several meshes, each in its own colour ---------------------------------------------
+
+RED, BLUE = (220, 40, 40), (40, 40, 220)
+
+
+def _hue_masks(r):
+    px = pixels(r).astype(int)
+    red = (px[..., 0] > 120) & (px[..., 2] < 90) & (px[..., 1] < 90)
+    blue = (px[..., 2] > 120) & (px[..., 0] < 90) & (px[..., 1] < 90)
+    return red, blue
+
+
+def test_render_scene_two_colours():
+    left, right = box((10, 10, 10), (0, 0, 5)), box((10, 10, 10), (10, 0, 5))  # touching at x = 5
+    r = render_model.render_scene([(left, RED), (right, BLUE)], View("front"))
+    red, blue = _hue_masks(r)
+    assert red.sum() > 1000 and blue.sum() > 1000
+    (lx, ly), (rx, ry) = r.project([(0, -5, 5), (10, -5, 5)])
+    assert red[int(ly), int(lx)] and blue[int(ry), int(rx)]
+    # A section draws each item's cut face in a darker shade of its own colour, with a line between them.
+    s = render_model.render_scene([(left, RED), (right, BLUE)], section=Section((5, 0, 5), (0, -1, 0)))
+    dark_red = tuple(round(v * render_model.SCENE_CUT_SHADE) for v in RED)
+    dark_blue = tuple(round(v * render_model.SCENE_CUT_SHADE) for v in BLUE)
+    (lx, ly), (rx, ry), (mx, my) = s.project([(0, 0, 5), (10, 0, 5), (5, 0, 5)])
+    assert tuple(pixels(s)[int(ly), int(lx)]) == dark_red
+    assert tuple(pixels(s)[int(ry), int(rx)]) == dark_blue
+    assert color_mask(s, render_model.EDGE_RGB)[int(my) - 20:int(my) + 20, int(mx) - 2:int(mx) + 2].any()
+
+
+def test_render_unchanged_for_single_mesh():
+    mesh = cup()
+    for kwargs in ({"view": View("iso")}, {"view": View("front"), "markers": [((0, -15, 10), 1)]}):
+        a = render(mesh, **kwargs)
+        b = render_model.render_scene([(mesh, render_model.PART_RGB)], **kwargs)
+        assert a.image.tobytes() == b.image.tobytes()
+    cut = render(mesh, section=Section((0, 0, 10), (0, -1, 0)))
+    assert color_mask(cut, CUT_RGB).sum() > 1000  # render() keeps the orange cut faces
+
+
+def test_render_scene_centre_and_scale():
+    mesh = box((40, 30, 20), (0, 0, 10))
+    r = render_model.render_scene([(mesh, RED)], View("front"), mm_per_px=0.1, center=(15, 0, 5))
+    (x, y), = r.project([(15, 0, 5)])
+    assert (x, y) == pytest.approx(r.origin_px)
+    assert r.mm_per_px == 0.1
+
+
+def test_render_scene_overlap_is_red_and_coincident_faces_dont_speckle():
+    big, small = box((10, 10, 10), (0, 0, 5)), box((4, 10, 4), (0, 0, 5))  # small inside big, front faces flush
+    r = render_model.render_scene([(big, RED), (small, BLUE)], View("front"))
+    (x0, y0), (x1, y1) = r.project([(-1.5, -5, 6.5), (1.5, -5, 3.5)])
+    patch = pixels(r)[int(y0):int(y1), int(x0):int(x1)].reshape(-1, 3)
+    assert len({tuple(p) for p in patch.tolist()}) == 1  # one flat colour: the first item's, no z-fighting
+    red, blue = _hue_masks(r)
+    assert red[int(y0), int(x0)] and not blue.any()
+    s = render_model.render_scene([(big, RED), (small, BLUE)], section=Section((0, 0, 5), (0, -1, 0)))
+    (cx, cy), (ex, ey) = s.project([(0, 0, 5), (4, 0, 5)])
+    assert tuple(pixels(s)[int(cy), int(cx)]) == render_model.OVERLAP_RGB and s.overlap[int(cy), int(cx)]
+    assert tuple(pixels(s)[int(ey), int(ex)]) == tuple(round(v * render_model.SCENE_CUT_SHADE) for v in RED)
+
+
+def test_render_scene_pair_styles_and_thin_overlaps():
+    # two blocks interpenetrating by 0.2 mm, at 0.02 mm/px: the 10 px wide overlap is all red, not eroded away
+    a, b = box((4, 4, 4), (0, 0, 2)), box((4, 4, 4), (3.8, 0, 2))
+    sec = Section((1.9, 0, 2), (0, -1, 0))
+    r = render_model.render_scene([(a, RED), (b, BLUE)], section=sec, mm_per_px=0.02, center=(1.9, 0, 2))
+    red = color_mask(r, render_model.OVERLAP_RGB)
+    assert red.sum() >= 8 * 100 and red.sum() <= r.overlap.sum()  # edges may draw over a few
+    # a listed engaged pair is hatched with ENGAGED_RGB, never red; an unlisted pair isn't painted at all
+    styles = {frozenset((0, 1)): render_model.ENGAGED}
+    e = render_model.render_scene([(a, RED), (b, BLUE)], section=sec, mm_per_px=0.02, center=(1.9, 0, 2),
+                                  overlaps=styles)
+    assert not color_mask(e, render_model.OVERLAP_RGB).any() and not e.overlap.any()
+    assert color_mask(e, render_model.ENGAGED_RGB).sum() > 100 and e.engaged.any()
+    n = render_model.render_scene([(a, RED), (b, BLUE)], section=sec, mm_per_px=0.02, center=(1.9, 0, 2),
+                                  overlaps={})
+    assert not color_mask(n, render_model.OVERLAP_RGB).any() and not color_mask(n, render_model.ENGAGED_RGB).any()
