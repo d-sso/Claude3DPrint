@@ -170,7 +170,15 @@ Each group lists `interfaces[]` (name, type, `status`, `measured`, `expected`, `
 - The shadow is what finds a slot in a wall at an angle to the line: no single cross-section closes round the line there.
 - Material beyond the stand-in's ends doesn't count, so a box's far wall on the line is fine.
 - A stand-in ends inside an opening when the section just inside its end (0.2 mm in, or half way into the body when it enters less) surrounds the line (a rod stopping in a hole, however shallow), or when an opening's shadow runs across its end (a strip stopping inside a slanted slot). That fails, unless the Passage has `ends_inside=True`.
-- `ends_inside=True` (default False) lets a stand-in end inside an opening (a strip cut to end in a slanted wall's slot, a rod in a blind hole). It must have entered the opening from a face of the body: the range's other end lies within the stand-in's length. The run line must cross no material from that face to its end, and the shadow from that face to its reach past the end must surround the line. The overlap and `min_clearance` checks are unchanged, so an end inside the material beside the slot fails. A stand-in that stops before an opening still fails, and so does one that ends inside an opening of a range it lies wholly within (it entered from no face). A slanted strip passes once its leading side is in the slot, even with its centre line still short of the wall.
+- `ends_inside=True` (default False) lets a stand-in end inside an opening: a strip cut to end in a slanted wall's slot, or a rod stopping in a hole or a blind hole. It is judged per body range, as above:
+  - It must enter from a face of the body: the body's material near the line starts within the stand-in's length on one side. A stand-in with the body's material running on past both of its ends is rejected.
+  - It must reach min(1.0 mm, half the range's length) past that face, else "it enters the opening only X mm". A rod entering a 3 mm plate's hole by 0.05 mm fails, by 1.0 mm it passes.
+  - The run line must cross no material from that face to its end.
+  - The shadow from that face to the stand-in's reach past its end (half its cross-section diagonal + `min_clearance` + 1 mm) must surround the line. The shadow stops early at the first material on the line past the end, such as a blind hole's floor, so a rod seated 0.5 mm above the floor passes.
+  - The overlap and `min_clearance` checks are unchanged, so an end inside the material beside the slot fails. A stand-in that stops before an opening fails, because no opening runs across its end.
+  - Known generous passes:
+    - A slanted strip passes once its leading side is in the slot, even with its centre line still short of the wall.
+    - A rod that ends inside a U-channel or trough of the part passes, because a trough counts as an opening. That holds even if the hole you meant lies further on in the same body.
 - `measured`: `opening` (the depth range used, from the stand-in's centre), `aperture` (the widest circle's diameter in the shadow), `clearance`, `overlap_mm3`.
 - U-clips and troughs (about 290 degrees of cover) count as openings.
 - Known safe false fail: a stand-in that stops within its reach (half its cross-section diagonal + `min_clearance` + 1 mm) past a slanted opening (declare `ends_inside=True` if it should end there).

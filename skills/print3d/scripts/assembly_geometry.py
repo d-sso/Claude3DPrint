@@ -554,10 +554,11 @@ def passage_opening(shape, origin, direction, *, search_r: float, extent, ends_i
     section there closes round the line. Material beyond the stand-in's extent (a box's far wall) doesn't count.
 
     ends_inside=True: a stand-in that ends inside an opening (as _ends_in_opening finds it) may end there, provided
-    the range's other end lies within its extent: it entered the opening from that face of the body. The line must
-    cross no material from that face to the stand-in's end, and the shadow from that face to search_r past the end
-    (the opening across the end) must enclose the line. A stand-in that ends inside an opening at both ends of a
-    range (it never entered it) still fails, and so does one that ends before an opening (that is no opening
+    the range's other end lies within its extent (it entered the opening from that face of the body) and it runs
+    at least min(MIN_HOLE_DEPTH, half the range) into the range from that face. The line must cross no material
+    from that face to the stand-in's end, and the shadow from that face to search_r past the end, or to the first
+    material on the line past it (a blind hole's floor), must enclose the line. A stand-in with the body's material
+    running on past both of its ends still fails, and so does one that ends before an opening (that is no opening
     across its end).
     """
     local = Plane(origin=origin, z_dir=direction).to_local_coords(shape)
@@ -602,14 +603,25 @@ def _body_opening(local, clipped, near, whole, extent, search_r, reasons, ends_i
             entry = " and doesn't enter it from a face of the part" if ends_inside else ""
             reasons.append(f"it ends inside an opening at {inside[0][0]:.2f} mm along its line{entry} ({where})")
             continue
-        crossings = [w for w in _line_hits(whole, (0, 0, 0), (0, 0, 1)) if lo + RAY_TOL < w < hi - RAY_TOL]
+        if inside:  # ends_inside: it must enter the body by min(MIN_HOLE_DEPTH, half its material) from that face
+            end, inward = inside[0]
+            entered, need = (end - a) if inward < 0 else (b - end), min(MIN_HOLE_DEPTH, (b - a) / 2)
+            if entered < need - RAY_TOL:
+                reasons.append(f"it enters the opening only {entered:.2f} mm, it needs {need:.2f} mm "
+                               f"(it ends at {end:.2f} mm along its line; {where})")
+                continue
+        hits = _line_hits(whole, (0, 0, 0), (0, 0, 1))
+        crossings = [w for w in hits if lo + RAY_TOL < w < hi - RAY_TOL]
         if crossings:
             reasons.append(f"blocked: material on its line at {crossings[0]:.2f} mm along it")
             continue
         seen = (lo, hi)
-        if inside:  # the opening runs across the end: see it out to search_r past the end
-            end, inward = inside[0]
-            seen = (lo, min(b, end + search_r)) if inward < 0 else (max(a, end - search_r), hi)
+        if inside:  # the opening runs across the end: see it out to search_r past the end, or to the first material
+            # on the line past it (a blind hole's floor)
+            if inward < 0:
+                seen = (lo, min([b, end + search_r, *(w for w in hits if w > end - RAY_TOL)]))
+            else:
+                seen = (max([a, end - search_r, *(w for w in hits if w < end + RAY_TOL)]), hi)
         result = _shadow(clipped, *seen, search_r)
         if _encloses(result):
             return OpeningProbe(True, (lo, hi), result[0], result[1])

@@ -364,6 +364,29 @@ def test_passage_ends_inside_still_needs_to_reach_the_opening():
     assert result["message"].startswith("not found:")
 
 
+def test_passage_ends_inside_needs_a_real_entry():
+    # the rod comes down into a 3 mm plate's hole (z -1.5..1.5): it must enter min(1.0, half the plate) of it
+    for depth, status in ((0.05, "fail"), (1.0, "pass")):
+        rod = Pos(0, 0, 1.5 - depth + 10) * Cylinder(2, 20)
+        items = {"plate": stand_in("plate", plate_with_hole()), "rod": stand_in("rod", rod)}
+        result = passage(items, ["plate"], ends_inside=True)
+        assert result["status"] == status, (depth, result["message"])
+        if status == "fail":
+            assert "it enters the opening only 0.05 mm, it needs 1.00 mm" in result["message"]
+
+
+def test_passage_ends_inside_a_blind_hole():
+    # a 6 mm blind hole (z 0..6, floor at z 0) in a block (z -2..6); the rod stops 0.5 mm above the floor
+    from build123d import Align
+
+    top = (Align.CENTER, Align.CENTER, Align.MAX)
+    block = Pos(0, 0, 6) * (Box(20, 20, 8, align=top) - Cylinder(3, 6, align=top))
+    items = {"block": stand_in("block", block), "rod": stand_in("rod", Pos(0, 0, 10.5) * Cylinder(2, 20))}
+    assert passage(items, ["block"])["status"] == "fail"
+    result = passage(items, ["block"], ends_inside=True)
+    assert result["status"] == "pass", result["message"]
+
+
 def test_passage_ends_inside_the_material_beside_the_slot_fails():
     # the bar (z 4.5..7.5) ends at the slanted wall's mid-plane, in the wall above the slot (z -2.5..2.5)
     items = {"wall": stand_in("wall", oblique_wall()), "rod": stand_in("rod", Pos(-15, 0, 6) * Box(30, 10, 3))}

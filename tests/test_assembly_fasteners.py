@@ -502,6 +502,17 @@ def test_nut_tunnel_past_the_nut_not_counted_in_hole_offset(tunnel_top):
     assert "block: hole offset 0.3 mm from the screw axis" in result["message"]
 
 
+def test_nut_tunnel_measured_when_it_is_all_the_hole():
+    # the hex tunnel (0.12 off-centre) runs through the whole block: no narrower hole is left, so the tunnel is measured
+    block = Pos(0, 0, -3) * Box(20, 20, 13, align=MIN_Z) - hex_prism(5.8, 13, z0=-3, dx=0.12)
+    items, bolt = tunnel_joint()
+    items = {**items, "block": stand_in("block", block)}
+    result = ac.check_interface(bolt, items)
+    assert result["status"] == "fail"
+    assert result["measured"]["offset"]["block"] == pytest.approx(0.12, abs=0.02)
+    assert not any("tunnel" in why for _, _, why in result["measured"]["excluded"]["block"])
+
+
 def test_nut_tunnel_only_in_the_nut_pocket_part():
     items, bolt = tunnel_joint()
     pocket = pa.NutPocket("pocket", "nut", "block", source="test")
