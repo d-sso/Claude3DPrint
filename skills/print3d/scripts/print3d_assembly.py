@@ -20,7 +20,7 @@ from dataclasses import KW_ONLY, dataclass, field
 from dataclasses import replace as dataclass_replace
 
 from OCP.gp import gp_Pnt, gp_Vec
-from build123d import Location, Shape
+from build123d import Location, Plane, Shape
 
 import hardware
 from assembly_geometry import TARGET_TOL
@@ -216,7 +216,12 @@ class Screw:
 
 @dataclass
 class Nut:
-    """A nut stand-in: its z = 0 face (away from the head) at `origin`, running along +`direction`."""
+    """A nut stand-in: its z = 0 face (away from the head) at `origin`, running along +`direction`.
+
+    `angle` turns the hex about its own axis (degrees, right-handed about `direction`), after the frame is set. At
+    angle 0 one corner points along the frame's local +X, which is the x_dir that build123d's
+    Plane(origin, z_dir=direction) picks: +X for direction +Z, -X for -Z, +Z for +X and +Y, -Z for -X and -Y.
+    """
 
     name: str
     size: str
@@ -224,6 +229,7 @@ class Nut:
     origin: tuple
     direction: tuple
     color: tuple | str | None = None
+    angle: float = 0.0
 
     def __post_init__(self):
         _name(self)
@@ -232,6 +238,7 @@ class Nut:
         self.origin = _vec(self, "origin")
         self.direction = _vec(self, "direction", unit=True)
         self.color = _color(self)
+        self.angle = _num_field(self, "angle")
 
 
 @dataclass
@@ -279,7 +286,10 @@ HARDWARE_TYPES = (Screw, Nut, Washer)
 
 @dataclass
 class Bolted:
-    """A screw on its axis through parts; `through` is [(item, role)], role "clearance", "thread" or "insert"."""
+    """A screw on its axis through parts; `through` is [(item, role)], role "clearance", "thread" or "insert".
+
+    `washer` names a Washer under the head, `nut_washer` one between the parts and the nut (it needs `nut`).
+    """
 
     name: str
     screw: str
@@ -289,11 +299,19 @@ class Bolted:
     source: str
     limit: float | None = None
     protrusion: float | None = None
+    washer: str | None = None
+    nut_washer: str | None = None
 
     def __post_init__(self):
         _name(self)
         _name(self, "screw")
         _opt_name(self, "nut")
+        _opt_name(self, "washer")
+        _opt_name(self, "nut_washer")
+        if self.nut_washer is not None and self.nut is None:
+            raise ValueError(f"{_where(self, 'nut_washer')} is the washer under the nut, so it needs nut= too")
+        if self.washer is not None and self.washer == self.nut_washer:
+            raise ValueError(f"{_where(self, 'washer')} and nut_washer must be two different washers")
         if isinstance(self.through, str) or not isinstance(self.through, (tuple, list)) or not self.through:
             raise ValueError(f"{_where(self, 'through')} must be a non-empty list of (item, role), got {self.through!r}")
         pairs = []
@@ -313,7 +331,9 @@ class Bolted:
 
     def references(self):
         refs = [("screw", self.screw, Screw)] + [("through", item, None) for item, _ in self.through]
-        return refs + ([("nut", self.nut, Nut)] if self.nut is not None else [])
+        refs += [("nut", self.nut, Nut)] if self.nut is not None else []
+        return refs + [(fld, getattr(self, fld), Washer) for fld in ("washer", "nut_washer")
+                       if getattr(self, fld) is not None]
 
 
 @dataclass
@@ -818,7 +838,7 @@ _PATTERN_FIELDS = {
     Screw: (("origin",), ("direction",), ()),
     Nut: (("origin",), ("direction",), ()),
     Washer: (("origin",), ("direction",), ()),
-    Bolted: ((), (), ("screw", "nut", "through")),
+    Bolted: ((), (), ("screw", "nut", "through", "washer", "nut_washer")),
     NutPocket: ((), (), ("nut", "part")),
     Snap: (("point",), ("normal", "insert_dir"), ("bump", "catch")),
     Seat: (("point",), ("normal",), ("a", "b")),
@@ -848,6 +868,32 @@ def _moved(loc, value, *, direction):
     return tuple(0.0 if abs(c) < 1e-12 else c for c in (v.X(), v.Y(), v.Z()))
 
 
+def _nut_zero(direction):
+    """The local +X of a nut's frame: where its corner points at angle 0."""
+    return tuple(Plane(origin=(0, 0, 0), z_dir=direction).x_dir)
+
+
+def _turned_angle(template, loc, direction):
+    """A Nut's angle after `loc` turned it (and its direction to `direction`): its corners turn with the copy."""
+    d0, x0 = template.direction, _nut_zero(template.direction)
+    a = math.radians(template.angle)
+    y0 = _cross(d0, x0)
+    corner = tuple(math.cos(a) * x + math.sin(a) * y for x, y in zip(x0, y0))
+    turned = _moved(loc, corner, direction=True)
+    x1 = _nut_zero(direction)
+    y1 = _cross(direction, x1)
+    angle = math.degrees(math.atan2(_dot(turned, y1), _dot(turned, x1)))
+    return 0.0 if abs(angle) < 1e-9 else angle
+
+
+def _dot(u, v):
+    return sum(p * q for p, q in zip(u, v))
+
+
+def _cross(u, v):
+    return (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
+
+
 def _turned_axis(template, loc):
     """The Size axis after the rotation of `loc`: it must stay a principal axis."""
     unit = [1.0 if a == template.axis else 0.0 for a in AXES]
@@ -864,7 +910,8 @@ def repeat(template, locations, *, name=None) -> list:
     """Copies of one declaration (an item, interface or target), each moved by one of `locations`.
 
     Points (origins, section points) move with the Location; directions and normals only turn; a Part's or
-    StandIn's `at` becomes loc * at; a Size axis turns with the rotation. Names: `name` is a pattern with {name}
+    StandIn's `at` becomes loc * at; a Size axis turns with the rotation; a Nut's angle changes so its corners turn
+    with the copy. Names: `name` is a pattern with {name}
     (the template's name) and {i} (0-based index); default "{name}-{i}", or the template's own name when that
     is a pattern itself ("bolt-{i}"). Names of other items (screw, nut, through, a, b, ...) that contain {i} get the same index; names
     without it are kept, so every copy can refer to one shared part. Each copy is validated like a hand-written
@@ -911,5 +958,7 @@ def repeat(template, locations, *, name=None) -> list:
             changes["at"] = loc * template.at
         if kind is Size:
             changes["axis"] = _turned_axis(template, loc)
+        if kind is Nut:
+            changes["angle"] = _turned_angle(template, loc, changes["direction"])
         copies.append(dataclass_replace(template, **changes))
     return copies

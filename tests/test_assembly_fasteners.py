@@ -310,3 +310,167 @@ def test_nut_off_the_shank_axis(boxlid):
     result = ac.check_interface(interface(unit, "bolt-left"), with_hardware(items, nut))
     assert result["status"] == "fail"
     assert "nut-left: nut axis 0.5 mm from the screw axis" in result["message"]
+
+
+# --- thread pilot (R11) ------------------------------------------------------------------------------------------
+
+
+def test_thread_counterbore_over_pilot_screw_ends_in_counterbore():
+    # a 3.4 counterbore (t -8..-3) over a 2.5 pilot (t -13..-8): the M3x6 tip at t -6 never reaches the pilot
+    base = (Box(20, 20, 10, align=MIN_Z) - Cylinder(1.25, 10, align=MIN_Z)
+            - Pos(0, 0, 5) * Cylinder(1.7, 5, align=MIN_Z))
+    items, bolt = joint({"lid": (holed_plate(10), "clearance"), "base": (base, "thread")}, 6.0)
+    result = ac.check_interface(bolt, items)
+    assert result["status"] == "fail"
+    assert result["message"].startswith("not found: no pilot hole smaller than M3 in base")
+    # a longer screw reaches 2 mm into the pilot: it engages
+    items, bolt = joint({"lid": (holed_plate(10), "clearance"), "base": (base, "thread")}, 10.0)
+    result = ac.check_interface(bolt, items)
+    assert result["status"] == "pass", result["message"]
+    assert result["measured"]["engagement"]["base"] == pytest.approx(2.0, abs=1e-3)
+
+
+def test_thread_part_with_clearance_hole_only():
+    items, bolt = joint({"lid": (holed_plate(10), "clearance"), "base": (holed_plate(0, thickness=10), "thread")},
+                        10.0)
+    result = ac.check_interface(bolt, items)
+    assert result["status"] == "fail"
+    assert result["message"].startswith("not found: no pilot hole smaller than M3 in base")
+
+
+def test_thread_proper_pilot_passes():
+    base = Box(20, 20, 10, align=MIN_Z) - Cylinder(1.25, 10, align=MIN_Z)
+    items, bolt = joint({"lid": (holed_plate(10), "clearance"), "base": (base, "thread")}, 8.0)
+    result = ac.check_interface(bolt, items)
+    assert result["status"] == "pass", result["message"]
+    assert result["measured"]["engagement"]["base"] == pytest.approx(5.0, abs=1e-3)
+
+
+# --- nut angle ----------------------------------------------------------------------------------------------------
+
+
+def hex_prism(af, height, angle_deg=0.0, z0=0.0, dx=0.0):
+    """A hex prism (across flats af) from z0 up, its corners at angle_deg + k * 60 degrees about +Z."""
+    import math
+
+    from build123d import Face, Location, Solid, Vector, Wire
+
+    r = af / math.sqrt(3)
+    pts = [Vector(r * math.cos(math.radians(60 * i + angle_deg)), r * math.sin(math.radians(60 * i + angle_deg)), 0)
+           for i in range(6)]
+    prism = Solid.extrude(Face(Wire.make_polygon(pts, close=True)), Vector(0, 0, height))
+    return prism.moved(Location((dx, 0, z0)))
+
+
+def test_nut_angle_aligns_with_a_turned_pocket():
+    # a hex pocket turned 30 degrees: the nut's corners (along +x at angle 0) hit its flats
+    block = Box(20, 20, 6, align=MIN_Z) - hex_prism(5.7, 3, angle_deg=30) - Cylinder(1.8, 6, align=MIN_Z)
+    items = {"block": stand_in("block", block)}
+    pocket = pa.NutPocket("pocket", "nut", "block", source="test")
+    for angle, status in ((0.0, "fail"), (30.0, "pass")):
+        nut = pa.Nut("nut", "M3", "hex", origin=(0, 0, 0.3), direction=(0, 0, 1), angle=angle)
+        result = ac.check_interface(pocket, with_hardware(items, nut))
+        assert result["status"] == status, result["message"]
+        if status == "fail":
+            assert "nut: the nut overlaps block by" in result["message"]
+        else:
+            assert result["measured"]["overlap_mm3"] == 0
+
+
+def test_nut_angle_validated():
+    with pytest.raises(ValueError, match="angle"):
+        pa.Nut("nut", "M3", "hex", origin=(0, 0, 0), direction=(0, 0, 1), angle="30")
+    assert pa.Nut("nut", "M3", "hex", origin=(0, 0, 0), direction=(0, 0, 1), angle=15).angle == 15.0
+
+
+# --- washers ------------------------------------------------------------------------------------------------------
+
+
+def washer_joint(lift=0.0, declare=True):
+    """An M3 socket screw on an M3 washer (0.5 thick) on a 3 mm plate (z 10..13); `lift` raises washer and screw."""
+    top = 13.0 + lift
+    screw = pa.Screw("screw", "M3", "socket", 6.0, origin=(0, 0, top + 0.5), direction=(0, 0, 1))
+    washer = pa.Washer("washer", "M3", origin=(0, 0, top), direction=(0, 0, 1))
+    items = {"plate": stand_in("plate", holed_plate(10)), "screw": assemble_model.place_simple(screw),
+             "washer": assemble_model.place_simple(washer)}
+    bolt = pa.Bolted("j", "screw", [("plate", "clearance")], washer="washer" if declare else None, source="test")
+    return items, bolt
+
+
+def test_washer_under_the_head_passes():
+    items, bolt = washer_joint()
+    result = ac.check_interface(bolt, items)
+    assert result["status"] == "pass", result["message"]
+    assert result["measured"]["head_gap"] == pytest.approx(0.0, abs=1e-3)
+    assert result["measured"]["washers"]["washer"]["gap"] == pytest.approx(0.0, abs=1e-3)
+    assert "washer" in result["items"]
+
+
+def test_lifted_washer_fails_on_its_seat():
+    items, bolt = washer_joint(lift=0.5)
+    result = ac.check_interface(bolt, items)
+    assert result["status"] == "fail"
+    assert "washer: washer 0.5 mm from the part surface" in result["message"]
+    assert result["measured"]["head_gap"] == pytest.approx(0.0, abs=1e-3)
+
+
+def test_undeclared_washer_reads_as_a_head_gap():
+    items, bolt = washer_joint(declare=False)
+    result = ac.check_interface(bolt, items)
+    assert result["status"] == "fail"
+    assert "screw: head 0.5 mm above the part surface" in result["message"]
+
+
+def test_washer_off_axis_fails():
+    items, bolt = washer_joint()
+    moved = pa.Washer("washer", "M3", origin=(0.3, 0, 13.0), direction=(0, 0, 1))
+    result = ac.check_interface(bolt, with_hardware(items, moved))
+    assert result["status"] == "fail"
+    assert "washer: washer axis 0.3 mm from the screw axis" in result["message"]
+
+
+def test_washer_declarations_validated():
+    with pytest.raises(ValueError, match="nut_washer"):
+        pa.Bolted("j", "screw", [("lid", "clearance")], nut_washer="w", source="test")
+    screw = pa.Screw("screw", "M3", "socket", 6.0, origin=(0, 0, 13), direction=(0, 0, 1))
+    nut = pa.Nut("nut", "M3", "hex", origin=(0, 0, 7), direction=(0, 0, 1))
+    lid = pa.StandIn("lid", Box(5, 5, 5))
+    bolt = pa.Bolted("j", "screw", [("lid", "clearance")], washer="nut", source="test")
+    with pytest.raises(ValueError, match="must be a Washer"):
+        pa.Unit("u", [screw, nut, lid], interfaces=[bolt])
+
+
+def test_nut_side_washer_seat():
+    # M3x12 down through a 3 mm plate (z 10..13); a washer under the plate (z 9.5..10), the nut below it (z 7.1..9.5)
+    screw = pa.Screw("screw", "M3", "socket", 12.0, origin=(0, 0, 13), direction=(0, 0, 1))
+    nut = pa.Nut("nut", "M3", "hex", origin=(0, 0, 7.1), direction=(0, 0, 1))
+    items = {"plate": stand_in("plate", holed_plate(10)), "screw": assemble_model.place_simple(screw),
+             "nut": assemble_model.place_simple(nut)}
+    bolt = pa.Bolted("j", "screw", [("plate", "clearance")], nut="nut", nut_washer="w", source="test")
+    for z, status in ((9.5, "pass"), (9.0, "fail")):
+        w = pa.Washer("w", "M3", origin=(0, 0, z), direction=(0, 0, 1))
+        result = ac.check_interface(bolt, with_hardware(items, w))
+        assert result["status"] == status, result["message"]
+    assert "w: washer 0.5 mm from the part surface" in result["message"]
+
+
+# --- the nut's depths are not the hole -----------------------------------------------------------------------------
+
+
+def test_off_centre_nut_tunnel_not_counted_in_hole_offset():
+    # a centred clearance hole in a 10 mm block, a hex tunnel 0.12 off-centre for the nut (z 0..2.4)
+    block = Box(20, 20, 10, align=MIN_Z) - Cylinder(1.8, 10, align=MIN_Z) - hex_prism(5.8, 2.4, dx=0.12)
+    screw = pa.Screw("screw", "M3", "socket", 12.0, origin=(0, 0, 10), direction=(0, 0, 1))
+    nut = pa.Nut("nut", "M3", "hex", origin=(0, 0, 0), direction=(0, 0, 1))
+    items = {"block": stand_in("block", block), "screw": assemble_model.place_simple(screw),
+             "nut": assemble_model.place_simple(nut)}
+    bolt = ac.check_interface(pa.Bolted("j", "screw", [("block", "clearance")], nut="nut", source="test"), items)
+    assert bolt["status"] == "pass", bolt["message"]
+    assert bolt["measured"]["offset"]["block"] <= 0.02
+    assert any("nut" in why for _, _, why in bolt["measured"]["excluded"]["block"])
+    pocket = ac.check_interface(pa.NutPocket("pocket", "nut", "block", source="test"), items)
+    assert pocket["measured"]["offset"] == pytest.approx(0.12, abs=0.02)
+    assert pocket["status"] == "fail" and "from the pocket centre" in pocket["message"]
+    # without the nut declared on the joint, the tunnel is part of the hole and its offset counts
+    bare = ac.check_interface(pa.Bolted("j", "screw", [("block", "clearance")], source="test"), items)
+    assert bare["measured"]["offset"]["block"] == pytest.approx(0.12, abs=0.02)

@@ -8,7 +8,7 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
-from build123d import Compound, Face, Plane, Solid, Vector, Wire
+from build123d import Compound, Face, Location, Plane, Solid, Vector, Wire
 from OCP.BRepIntCurveSurface import BRepIntCurveSurface_Inter
 from OCP.gp import gp_Lin
 from scipy.spatial import ConvexHull, QhullError, Voronoi, cKDTree
@@ -35,6 +35,8 @@ REGION_FACTOR = 1.9  # the free region is looked for within this many search rad
 EDGE_MATCH = 1e-3  # mm, how close an edge must lie to the region circle to count as part of it
 RAY_TOL = 1e-6  # mm
 RAY_SHIFT = 1.2345e-7  # mm, the even-odd test's rays run just off round numbers
+SHADOW_STEP = 0.25  # mm, an opening's shadow is built from sections this far apart (and END_INSET inside each slab)
+SHADOW_BATCH = 8  # sections added to a shadow between tests of whether it already encloses the line
 
 
 @dataclass
@@ -48,6 +50,7 @@ class HoleProbe:
     samples: int  # qualifying samples measured
     reason: str = ""  # why the hole wasn't found, "" when it was
     excluded: tuple = ()  # (lo, hi, reason) depth ranges near the axis that aren't a hole and weren't measured
+    depths: tuple = ()  # (lo, hi, offset, diameter, free_radius): each measured sample and the depths it stands for
 
 
 def _pieces(result):
@@ -123,9 +126,10 @@ def _clip(shape, radius, z_lo, z_hi):
     return Compound(solids) if solids else None
 
 
-def _slabs(clipped, lo, hi):
-    """Depth slabs between the Z levels of the clipped shape's vertices: within one the section's topology holds."""
-    levels = sorted({lo, hi, *(v.Z for v in clipped.vertices() if lo < v.Z < hi)})
+def _slabs(clipped, lo, hi, extra=()):
+    """Depth slabs between the Z levels of the clipped shape's vertices (and `extra` levels): within one the
+    section's topology holds."""
+    levels = sorted({lo, hi, *(z for z in (*(v.Z for v in clipped.vertices()), *extra) if lo < z < hi)})
     merged = [levels[0]]
     for z in levels[1:]:
         if z - merged[-1] > BREAK_MERGE:
@@ -235,15 +239,29 @@ def _in_slot_like_wire(shape, point, z):
     return False
 
 
+def _section(clipped, z):
+    return [face for piece in _pieces(clipped.intersect(Plane.XY.offset(z))) for face in piece.faces()]
+
+
+def _search_region(search_r, z):
+    return Face(Wire.make_circle(REGION_FACTOR * search_r, Plane.XY.offset(z)))
+
+
 def _hole_at_depth(local, clipped, z, search_r):
     """One section of the axis-frame shape at z: None (no material near), a failure reason, or the measurements."""
-    faces = _pieces(clipped.intersect(Plane.XY.offset(z)))
-    faces = [face for piece in faces for face in piece.faces()]
+    faces = _section(clipped, z)
     if not faces:
         return None
+    region = _search_region(search_r, z).cut(*faces)
+    return _hole_in_region(region, z, search_r, lambda: _in_slot_like_wire(local, Vector(0, 0, z), z))
+
+
+def _hole_in_region(region, z, search_r, slot_like):
+    """The hole round the axis in the free region (the search circle minus the material) in the plane at z: None
+    (no material near), a failure reason, or (offset, diameter, free_radius). slot_like() says whether an open
+    region still lies in a convex, empty closed hole further out."""
     axis_point = Vector(0, 0, z)
     region_r = REGION_FACTOR * search_r
-    region = Face(Wire.make_circle(region_r, Plane.XY.offset(z))).cut(*faces)
     free = [face for face in region.faces() if face.is_inside(axis_point)]
     if not free:
         return "blocked: the axis is inside material"
@@ -262,7 +280,7 @@ def _hole_at_depth(local, clipped, z, search_r):
     if free_radius > search_r:
         return None
     if not closed:  # open within the search region; a long slot is still closed further out
-        closed = _in_slot_like_wire(local, axis_point, z)
+        closed = slot_like()
     circle = _largest_inscribed(walls, np.concatenate(segments), closed)
     if circle is None:
         return "not a hole: the material doesn't enclose the axis"
@@ -274,21 +292,38 @@ def _not_found(span, samples, reason, excluded=()):
     return HoleProbe(False, math.nan, math.nan, math.nan, span, samples, reason, tuple(excluded))
 
 
-def _runs(owned):
-    """Merge consecutive (lo, hi, result) depth ranges into runs of qualifying (tuple) or excluded (str) results."""
+def _runs(owned, keep=()):
+    """Merge consecutive (lo, hi, result) depth ranges into runs [lo, hi, samples or reason, qualifies].
+
+    A qualifying (tuple) run keeps its samples [(lo, hi, result)]. Excluded (str) results merge into one run under
+    the first reason, except that a reason in `keep` (a skipped range) stays a run of its own.
+    """
     runs = []
     for lo, hi, result in owned:
         qualifies = isinstance(result, tuple)
-        if runs and runs[-1][3] == qualifies:
+        same = runs and runs[-1][3] == qualifies and (
+            qualifies or result == runs[-1][2] or (result not in keep and runs[-1][2] not in keep))
+        if same:
             runs[-1][1] = hi
             if qualifies:
-                runs[-1][2].append(result)
+                runs[-1][2].append((lo, hi, result))
         else:
-            runs.append([lo, hi, [result] if qualifies else result, qualifies])
+            runs.append([lo, hi, [(lo, hi, result)] if qualifies else result, qualifies])
     return runs
 
 
-def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0, span=None) -> HoleProbe:
+def _length(ranges):
+    """The total length covered by (lo, hi, ...) ranges, overlaps counted once."""
+    total, reach = 0.0, -math.inf
+    for lo, hi, *_ in sorted(ranges, key=lambda r: r[0]):
+        lo = max(lo, reach)
+        if hi > lo:
+            total += hi - lo
+            reach = hi
+    return total
+
+
+def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0, span=None, skip=()) -> HoleProbe:
     """Find the hole (or edge notch) in shape that the axis through origin along direction passes through.
 
     The axis line must not cross any material. The depths along it are split into slabs at the shape's vertex
@@ -304,6 +339,10 @@ def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0
     span=(lo, hi) limits everything to that range along the axis from origin (e.g. a screw from its tip to its
     seating plane): only material there can block the axis or make a hole, and material beyond it (the floor of a
     blind hole past the tip, a part further down the axis) is ignored.
+
+    skip=((lo, hi, reason), ...) are depth ranges excluded with that reason and not measured (e.g. where a nut sits
+    in its pocket); material there still blocks the axis. They don't apply when they would cover all the material
+    within search_r: then that material is all the hole there is.
     """
     local = Plane(origin=origin, z_dir=direction).to_local_coords(shape)
     box = local.bounding_box()
@@ -322,19 +361,24 @@ def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0
     crossings = [w for w in _line_hits(clipped, (0, 0, 0), (0, 0, 1)) if z_lo + RAY_TOL < w < z_hi - RAY_TOL]
     if crossings:  # catches layers thinner than the sample step and the end insets
         return _not_found(span, 0, f"blocked: material on the axis at {crossings[0]:.2f} mm along it")
+    skip = [(max(lo, span[0]), min(hi, span[1]), why) for lo, hi, why in skip
+            if min(hi, span[1]) - max(lo, span[0]) > RAY_TOL]
+    if skip and _length(skip) >= span[1] - span[0] - RAY_TOL:
+        skip = []
     open_reason = f"open: no wall within {search_r} mm of the axis"
     owned = []  # (lo, hi, result): each sample owns the depths up to half way to its neighbours in the slab
-    for lo, hi in _slabs(clipped, *span):
+    for lo, hi in _slabs(clipped, *span, extra=[z for a, b, _ in skip for z in (a, b)]):
         depths = _slab_depths(lo, hi, step)
         bounds = [lo, *((a + b) / 2 for a, b in zip(depths[:-1], depths[1:])), hi]
         for index, z in enumerate(depths):
             result = _hole_at_depth(local, clipped, z, search_r)
             if isinstance(result, str) and result.startswith("blocked"):
                 return _not_found(span, 0, f"{result} at depth {z:.2f} mm along the axis")
-            owned.append((bounds[index], bounds[index + 1], open_reason if result is None else result))
-    runs = _runs(owned)
+            skipped = next((why for a, b, why in skip if a < z < b), None)
+            owned.append((bounds[index], bounds[index + 1], skipped or (open_reason if result is None else result)))
+    runs = _runs(owned, keep={why for _, _, why in skip})
     excluded = tuple((lo, hi, reason) for lo, hi, reason, qualifies in runs if not qualifies)
-    holes = [(lo, hi, measured) for lo, hi, measured, qualifies in runs if qualifies]
+    holes = [(lo, hi, samples) for lo, hi, samples, qualifies in runs if qualifies]
     need = min(MIN_HOLE_DEPTH, span[1] - span[0])
     longest = max((hi - lo for lo, hi, _ in holes), default=0.0)
     if longest < need - RAY_TOL:
@@ -347,11 +391,12 @@ def hole_on_axis(shape, origin, direction, *, search_r: float, step: float = 1.0
             reason = where if where.startswith("not a hole") else f"not a hole: {where}"
         else:
             reason = f"no material within {search_r} mm of the axis at the sampled depths"
-        return _not_found(span, sum(len(measured) for _, _, measured in holes), reason, excluded)
-    measured = [result for _, _, results in holes for result in results]
-    offsets, diameters, free_radii = zip(*measured)
+        return _not_found(span, sum(len(samples) for _, _, samples in holes), reason, excluded)
+    depths = tuple((lo, hi, *result) for _, _, samples in holes for lo, hi, result in samples)
+    offsets, diameters, free_radii = zip(*(d[2:] for d in depths))
     depth_span = (holes[0][0], holes[-1][1])
-    return HoleProbe(True, max(offsets), min(diameters), min(free_radii), depth_span, len(measured), "", excluded)
+    return HoleProbe(True, max(offsets), min(diameters), min(free_radii), depth_span, len(depths), "", excluded,
+                     depths)
 
 
 @dataclass
@@ -410,3 +455,115 @@ def pocket_section(shape, point, normal, radius) -> PocketSection:
     if circle is None:
         return PocketSection(False, math.nan, math.nan, False, "the walls don't enclose the point")
     return PocketSection(True, float(np.hypot(*circle[0])), _min_width(np.concatenate(outline)), False)
+
+
+# --- passage openings ---------------------------------------------------------------------------------------------
+
+
+@dataclass
+class OpeningProbe:
+    found: bool
+    span: tuple  # (lo, hi) along the line from origin: the part's material that makes the opening (found)
+    offset: float  # distance from the line to the centre of the opening's largest inscribed circle, in its shadow
+    diameter: float  # that circle's diameter: the clear aperture along the line
+    reason: str = ""
+
+
+def _encloses(result):
+    """True for a hole whose largest inscribed circle contains the axis."""
+    return isinstance(result, tuple) and result[0] <= result[1] / 2
+
+
+def _ranges(near):
+    """The depth ranges (lo, hi) of near's solids, merged where they touch or overlap."""
+    ranges = []
+    for lo, hi in sorted((s.bounding_box().min.Z, s.bounding_box().max.Z) for s in near.solids()):
+        if ranges and lo <= ranges[-1][1] + BREAK_MERGE:
+            ranges[-1][1] = max(ranges[-1][1], hi)
+        else:
+            ranges.append([lo, hi])
+    return [tuple(r) for r in ranges]
+
+
+def _shadow(clipped, lo, hi, search_r):
+    """The hole round the axis in the shadow along it of the material between depths lo and hi (the union of its
+    sections, SHADOW_STEP apart): None, a failure reason, or (offset, diameter, free_radius). Stops as soon as the
+    shadow encloses the axis. The union of sampled sections is part of the true shadow, so a gap between samples can
+    only make it fail."""
+    depths = [z for a, b in _slabs(clipped, lo, hi) for z in _slab_depths(a, b, SHADOW_STEP)]
+    region, result = _search_region(search_r, 0.0), None
+    for start in range(0, len(depths), SHADOW_BATCH):
+        faces = [face.moved(Location((0, 0, -z))) for z in depths[start:start + SHADOW_BATCH]
+                 for face in _section(clipped, z)]
+        if faces:
+            region = region.cut(*faces)
+            result = _hole_in_region(region, 0.0, search_r, lambda: False)
+            if _encloses(result) or (isinstance(result, str) and result.startswith("blocked")):
+                return result
+    return result
+
+
+def _ends_in_opening(local, clipped, end, inward, part_range, search_r):
+    """True when the stand-in, ending at depth `end` (its body on the `inward` side, +1 or -1), ends inside an
+    opening of the part: the section just inside its end encloses the axis, or the shadow of the material within
+    search_r of the end does while neither side's alone does (an opening that runs across the end)."""
+    inside = end + inward * END_INSET
+    if _encloses(_hole_at_depth(local, clipped, inside, search_r)):
+        return True
+    reach = (max(part_range[0], end - search_r), min(part_range[1], end + search_r))
+    if not _encloses(_shadow(clipped, *reach, search_r)):
+        return False
+    below, above = (reach[0], end), (end, reach[1])
+    return not any(hi - lo > RAY_TOL and _encloses(_shadow(clipped, lo, hi, search_r)) for lo, hi in (below, above))
+
+
+def passage_opening(shape, origin, direction, *, search_r: float, extent) -> OpeningProbe:
+    """Find an opening of shape that the stand-in on the line through origin along direction, over depths
+    extent = (lo, hi) along it, passes through.
+
+    The part's material within search_r of the line falls into depth ranges (its connected pieces there). A range
+    is an opening the stand-in passes when:
+    - it lies within the stand-in's extent, or the part's material runs on past an end of the stand-in but the
+      stand-in doesn't end inside an opening there (see _ends_in_opening);
+    - the line crosses no material in it;
+    - the shadow along the line of its material within the extent (the union of its sections) encloses the line:
+      the section rules of hole_on_axis (a closed region, a convex empty slot, or a notch with 200 degrees of
+      cover) applied to the shadow, and the shadow's largest inscribed circle contains the line.
+    Measuring the shadow, not single sections, is what finds a slot in a wall oblique to the line: no single
+    section there closes round the line. Material beyond the stand-in's extent (a box's far wall) doesn't count.
+    """
+    local = Plane(origin=origin, z_dir=direction).to_local_coords(shape)
+    box = local.bounding_box()
+    z_lo, z_hi = box.min.Z - 1.0, box.max.Z + 1.0
+    clipped = _clip(local, CLIP_FACTOR * search_r, z_lo, z_hi)
+    near = _clip(clipped, search_r, z_lo, z_hi) if clipped is not None else None
+    missing = OpeningProbe(False, (math.nan, math.nan), math.nan, math.nan,
+                           f"no material within {search_r:g} mm of its run line")
+    if near is None:
+        return missing
+    e0, e1 = extent
+    reasons = []
+    for a, b in _ranges(near):
+        lo, hi = max(a, e0), min(b, e1)
+        where = f"its material near the line from {a:.2f} to {b:.2f} mm along it"
+        if hi - lo <= RAY_TOL:
+            reasons.append(f"{where} lies beyond the stand-in ({e0:.2f} to {e1:.2f})")
+            continue
+        ends = [(end, inward) for end, inward, runs_on in ((e0, 1, a < e0 - RAY_TOL), (e1, -1, b > e1 + RAY_TOL))
+                if runs_on]
+        inside = next((end for end, inward in ends
+                       if _ends_in_opening(local, clipped, end, inward, (a, b), search_r)), None)
+        if inside is not None:
+            reasons.append(f"it ends inside an opening at {inside:.2f} mm along its line ({where})")
+            continue
+        crossings = [w for w in _line_hits(clipped, (0, 0, 0), (0, 0, 1)) if lo + RAY_TOL < w < hi - RAY_TOL]
+        if crossings:
+            reasons.append(f"blocked: material on its line at {crossings[0]:.2f} mm along it")
+            continue
+        result = _shadow(clipped, lo, hi, search_r)
+        if _encloses(result):
+            return OpeningProbe(True, (lo, hi), result[0], result[1])
+        why = "no wall near the line" if result is None else (
+            result if isinstance(result, str) else "the opening's widest circle doesn't contain the line")
+        reasons.append(f"{why}, seen along the line from {lo:.2f} to {hi:.2f} mm")
+    return OpeningProbe(False, (math.nan, math.nan), math.nan, math.nan, "; ".join(reasons) or missing.reason)

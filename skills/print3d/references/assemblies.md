@@ -66,6 +66,7 @@ items = [
 - `place(x, y, z, rx=, ry=, rz=)` is a `Location` (rotate rx, ry, rz in that order, then move); `flip()` rotates 180 degrees about X. Parts are modelled in print orientation, so a placement usually flips or rotates them.
 - `Part(name, model, at, params, color)`: `model` is relative to `assembly.py`; `params` override the part's PARAMETERS (variants); `"_part": "<name>"` picks one shape of a multi-part model. One model may be placed more than once.
 - Hardware is placed by its axis: `direction` is the screw's +Z, from tip towards head. `origin` is the head's seating plane for a `Screw`, and the face away from the head for a `Nut` or `Washer` (it runs from `origin` along `+direction`). Kinds: screw `socket`/`countersunk`/`button`; nut `hex`/`nyloc`. Sizes: M2, M2.5, M3, M4, M5 for socket screws, nuts and washers; countersunk and button heads exist for M3, M4, M5 only. Threads aren't modelled (a screw is a cylinder at its nominal diameter).
+- `Nut(..., angle=30)` turns the hex about its own axis (degrees, right-handed about `direction`) so it lines up with its pocket. At `angle=0` one corner points along the nut frame's local +X: +X for `direction` +Z, -X for -Z, +Z for +X and +Y, -Z for -X and -Y (build123d's `Plane(origin, z_dir=direction)`). `repeat` turns the angle with each copy.
 - A `StandIn` is a straight build123d shape made in `assembly.py`. Ask the user for its real size.
 - `color` is `(r, g, b)` or `"#rrggbb"`; hardware defaults to grey.
 
@@ -74,6 +75,7 @@ Every interface takes `source=` (keyword) and an optional `limit=` (mm), but onl
 ```python
 Bolted("bolt", "screw", [("lid", "clearance"), ("base", "thread")], source=SRC)  # roles: clearance, thread, insert
 Bolted("bolt", "screw", [("lid", "clearance"), ("base", "clearance")], nut="nut", protrusion=1.0, source=SRC)
+Bolted("bolt", "screw", [("lid", "clearance")], washer="washer", source=SRC)  # nut_washer= for one under the nut
 NutPocket("nut-pocket", "nut", "base", source=SRC)
 Snap("snap", "lid", "base", point=(0, -11, 18), normal=(1, 0, 0), insert_dir=(0, 0, -1),
      engagement=(0.3, 0.8), clearance=(0.1, 0.2), travel=10.0, source=SRC)
@@ -81,17 +83,20 @@ Seat("seat", "lid", "base", point=(0, -14, 20), normal=(0, 0, 1), source=SRC)
 Passage("strip", "strip", ["c1.block", "c2.block"], min_clearance=0.4, direction=(1, 0, 0), source=SRC)  # layout-level: dotted names resolve only in a Layout
 Clear("battery-clear", "battery", "base", min_distance=1.0, source=SRC)
 ```
-- **Bolted**: for each listed part, finds the hole on the screw's axis and checks its offset (<= limit) and its diameter by role (`clearance`: >= `screw_clearance(size)` - 0.1; `insert`: `insert_hole(size)` +/- 0.1; `thread`: diameter not checked, only engagement), that the head seats (no gap, no overlap), that the shank overlaps nothing, and that the screw is long enough (`design-rules.md` "Fastener engagement"). The nut, if given, must sit on the shank. Whether the nut fits its pocket is a separate `NutPocket` check. `protrusion=` overrides the rule's minimum.
+- **Bolted**: for each listed part, finds the hole on the screw's axis and checks its offset (<= limit) and its diameter by role (`clearance`: >= `screw_clearance(size)` - 0.1; `insert`: `insert_hole(size)` +/- 0.1; `thread`: only the pilot counts, see below), that the head seats (no gap, no overlap), that the shank overlaps nothing, and that the screw is long enough (`design-rules.md` "Fastener engagement"). The nut, if given, must sit on the shank. Whether the nut fits its pocket is a separate `NutPocket` check. `protrusion=` overrides the rule's minimum.
+  - `thread` role: only depths where the hole is narrower than the screw's major diameter (the pilot, e.g. 2.5 for M3) count towards engagement. A thread part with no such depth within the screw's length (a clearance-size hole, or a counterbore the tip ends in) fails as `not found: no pilot hole smaller than M3 in <part> ...`.
+  - Nut depths: where a declared nut sits on the axis (within the axis limit), the depths it spans aren't measured as any part's hole (the pocket would skew the offset); `excluded` lists them as "not measured: the nut sits here". They are measured if they are all the material near the axis.
+  - `washer=`: the head seats on that `Washer` (head to washer top <= 0.1), and the washer seats on the part below it (<= 0.1, measured from its bottom face). `nut_washer=` (needs `nut=`): the washer touches the part above it (<= 0.1). Each washer must be on the screw axis (<= limit) and overlap no listed part, and the shank isn't checked against it. An undeclared washer under a head reads as a head gap. A countersunk head with `washer=` fails.
 - **NutPocket**: the nut sits in the pocket without overlap, can't turn (pocket across-flats below the nut's across-corners), and is on its screw's axis.
 - **Snap**: measured in the section through `point` with `normal`; `insert_dir` is the direction the bump part moves to snap in and lies in the section plane. `engagement` and `clearance` are `(min, max)` in mm or `None`. Engagement = how far the bump reaches past the catch edge = bump height minus the per-side running clearance. A typical PLA+ skirt is 0.3 to 0.8 mm (`design-rules.md` "Snap engagement"). `fit="name"` reports a profile fit alongside the clearance.
 - **Seat**: faces of `a` and `b` near the plane (`point`, `normal`) touch. The gap is measured along `normal` through `point`.
-- **Passage**: the stand-in is taken as **straight**. Its run line (bounding-box centre, along `direction` or the longest bounding-box axis) must pass through an opening of **each** part in `through`, with at least `min_clearance` and no overlap.
-- **Clear**: `a` and `b` keep at least `min_distance` apart.
+- **Passage**: the stand-in is taken as **straight**. Its run line (bounding-box centre, along `direction` or the longest bounding-box axis) must pass through an opening of **each** part in `through`, with at least `min_clearance` and no overlap. One opening per part is enough (a cable through one wall of a box, a strip ending inside a tray), see "Passage" below.
+- **Clear**: `a` and `b` keep at least `min_distance` apart. Any overlap fails, whatever `min_distance` is: `min_distance=0` means "touching is fine, overlapping isn't".
 
 ### Targets
 - `Size(name, items, axis, value, source=, tol=0.1)`: bounding size of the items along "x", "y" or "z".
 - `Gap(name, a, b, direction_or_None, value, source=)`: distance between two items (None: smallest distance).
-- `Step(name, a, b, origin_a, origin_b, direction, value, source=)`: probe from each origin along `direction`; 0 means flush.
+- `Step(name, a, b, origin_a, origin_b, direction, value, source=)`: probe from each origin along `direction`; 0 means flush. `a` and `b` may be the same item (two faces of one part).
 - `Position(name, item, origin, direction, value, source=)`: where a probe first hits the item.
 - A bound instead of a value: `value=None` with `min=` and/or `max=` (mm), e.g.
   `Gap("battery-gap", "battery", "base", None, None, min=2.5, source=SRC)`. It passes iff min <= measured <= max
@@ -151,8 +156,16 @@ Each group lists `interfaces[]` (name, type, `status`, `measured`, `expected`, `
 - Known safe false fails ("not a hole"): curved or arc slots, slots with a nick in the edge, a slot with an unrelated pin inside.
 
 ### Passage
-- Known safe false fail: a part whose material continues past the stand-in's end.
+- The part's material within reach of the run line splits into depth ranges (its connected pieces there). A range is an opening the stand-in passes when:
+  - it lies within the stand-in's length, or the part runs on past a stand-in end but the stand-in doesn't end inside an opening there;
+  - the run line crosses no material in it;
+  - its **shadow** along the line (its sections within the stand-in's length, 0.25 mm apart, put together) surrounds the line by the hole rules above, and the widest circle in it contains the line.
+- The shadow is what finds a slot in a wall at an angle to the line: no single cross-section closes round the line there.
+- Material beyond the stand-in's ends doesn't count, so a box's far wall on the line is fine.
+- A stand-in ends inside an opening when the section just inside its end surrounds the line (a rod stopping in a hole), or when an opening's shadow runs across its end (a strip stopping inside a slanted slot). That fails.
+- `measured`: `opening` (the depth range used, from the stand-in's centre), `aperture` (the widest circle's diameter in the shadow), `clearance`, `overlap_mm3`.
 - U-clips and troughs (about 290 degrees of cover) count as openings.
+- Known safe false fail: a stand-in that stops within its reach (half its cross-section diagonal + `min_clearance` + 1 mm) past a slanted opening.
 
 ## Evidence sheets
 PNGs in `out/assembly/<unit or layout>/<check>.png`, plus one overview per unit and layout (iso, front, right, top, colour legend). Each item has its own colour; hardware is grey. Read each and say what it shows:

@@ -284,6 +284,8 @@ def place_simple(decl):
     else:
         raise TypeError(f"not an assembly item: {decl!r}")
     loc = Location(Plane(origin=decl.origin, z_dir=decl.direction))
+    if isinstance(decl, Nut) and decl.angle:
+        loc = loc * Location((0, 0, 0), (0, 0, 1), decl.angle)  # turned about its own axis, after the frame
     return PlacedItem(decl.name, kind, solid.moved(loc), decl.color, None, {}, decl, loc)
 
 

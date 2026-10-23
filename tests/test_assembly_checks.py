@@ -215,6 +215,115 @@ def test_passage_direction_declared():
     assert result["planes"][0][1] == [0.0, 0.0, 1.0]
 
 
+# --- passage: openings in one wall, oblique walls -----------------------------------------------------------------
+
+
+def oblique_wall():
+    """A 2 mm wall at 60 degrees to x (its normal 30 degrees from x) with a 14 x 5 slot about the origin."""
+    from build123d import Rot
+
+    return Rot(0, 0, 30) * (Box(2, 40, 20) - Box(2, 14, 5))
+
+
+def test_passage_through_oblique_wall_slot():
+    items = {"wall": stand_in("wall", oblique_wall()), "rod": stand_in("rod", Box(30, 10, 3))}
+    result = passage(items, ["wall"])
+    assert result["status"] == "pass", result["message"]
+    assert result["measured"]["clearance"]["wall"] == pytest.approx(0.56, abs=0.02)
+
+
+def test_passage_ending_inside_oblique_slot_not_found():
+    # the bar ends at x 1, inside the slanted slot: the wall's far slot end lies beyond it
+    items = {"wall": stand_in("wall", oblique_wall()), "rod": stand_in("rod", Pos(-14, 0, 0) * Box(30, 10, 3))}
+    result = passage(items, ["wall"])
+    assert result["status"] == "fail"
+    assert result["message"].startswith("not found: rod doesn't pass through an opening of wall")
+
+
+def test_passage_through_one_wall_of_a_box():
+    # a closed box (x -22..22, walls 2 thick), a 6 mm hole in its -x wall; the cable ends inside, near the floor, and
+    # the opposite wall lies on its line
+    box = Box(44, 30, 20) - Box(40, 26, 16) - Pos(-20, 0, -5) * Cylinder(3, 4, rotation=(0, 90, 0))
+    cable = Pos(-15, 0, -5) * Cylinder(2, 30, rotation=(0, 90, 0))  # x -30..0
+    items = {"box": stand_in("box", box), "rod": stand_in("rod", cable)}
+    result = passage(items, ["box"], direction=(1, 0, 0))
+    assert result["status"] == "pass", result["message"]
+
+
+def tray():
+    """A tray: floor (x -30..30, z -2..0), end walls 2 thick and 10 tall, a 12 x 4 slot (z 0.5..4.5) in the -x one."""
+    body = Pos(0, 0, -1) * Box(60, 20, 2)
+    for x in (-29, 29):
+        body += Pos(x, 0, 5) * Box(2, 20, 10)
+    return body - Pos(-29, 0, 2.5) * Box(2, 12, 4)
+
+
+def test_passage_strip_through_tray_end_wall_ending_inside():
+    items = {"tray": stand_in("tray", tray()), "rod": stand_in("rod", Pos(-20, 0, 2.5) * Box(40, 10, 3))}  # x -40..0
+    result = passage(items, ["tray"], min_clearance=0.4)
+    assert result["status"] == "pass", result["message"]
+    assert result["measured"]["clearance"]["tray"] == pytest.approx(0.5, abs=0.01)
+
+
+def test_passage_strip_along_a_parallel_wall():
+    # the strip runs beside a long side wall (1 mm away) and through the end wall's slot
+    body = tray() + Pos(0, 7.5, 5) * Box(56, 2, 10)  # a side wall at y 6.5..8.5
+    strip = Pos(-20, 0.5, 2.5) * Box(40, 10, 3)  # y -4.5..5.5
+    items = {"tray": stand_in("tray", body), "rod": stand_in("rod", strip)}
+    result = passage(items, ["tray"], min_clearance=0.4)
+    assert result["status"] == "pass", result["message"]
+
+
+def test_passage_rod_stops_halfway_through_a_thick_plate():
+    plate = Box(20, 20, 10) - Cylinder(3, 10)  # z -5..5
+    items = {"plate": stand_in("plate", plate), "rod": stand_in("rod", Pos(0, 0, 10) * Cylinder(2, 20))}  # z 0..20
+    result = passage(items, ["plate"])
+    assert result["status"] == "fail"
+    assert result["message"].startswith("not found: rod doesn't pass through an opening of plate")
+
+
+def test_passage_rod_beside_a_holed_plate_not_found():
+    # the plate's corner is cut away (x, y 6..10); the rod stands in that open corner, beside the plate
+    plate = Box(20, 20, 3) - Cylinder(3, 3) - Pos(8, 8, 0) * Box(4, 4, 3)
+    items = {"plate": stand_in("plate", plate), "rod": stand_in("rod", Pos(8.5, 8.5, 0) * Cylinder(1, 20))}
+    result = passage(items, ["plate"])
+    assert result["status"] == "fail"
+    assert result["message"].startswith("not found: rod doesn't pass through an opening of plate")
+
+
+def test_passage_through_a_gap_between_bodies_not_found():
+    # two separate blocks 6 apart, the rod between them: no opening, even though material is on both sides
+    from build123d import Compound
+
+    blocks = Compound([Pos(-8, 0, 0) * Box(10, 20, 4), Pos(8, 0, 0) * Box(10, 20, 4)])
+    items = {"blocks": stand_in("blocks", blocks), "rod": stand_in("rod", Cylinder(2, 20))}
+    result = passage(items, ["blocks"])
+    assert result["status"] == "fail"
+    assert result["message"].startswith("not found: rod doesn't pass through an opening of blocks")
+
+# --- clear and step -----------------------------------------------------------------------------------------------
+
+
+def test_clear_fails_on_overlap_whatever_min_distance():
+    items = {"a": stand_in("a", Box(10, 10, 10)), "b": stand_in("b", Pos(8, 0, 0) * Box(10, 10, 10))}
+    result = ac.check_interface(pa.Clear("c", "a", "b", 0.0, source="test"), items)
+    assert result["status"] == "fail"
+    assert "a overlaps b by 200 mm^3" in result["message"]
+    assert result["measured"]["overlap_mm3"] == pytest.approx(200.0, abs=0.01)
+    apart = {**items, "b": stand_in("b", Pos(10, 0, 0) * Box(10, 10, 10))}  # touching faces are not an overlap
+    assert ac.check_interface(pa.Clear("c", "a", "b", 0.0, source="test"), apart)["status"] == "pass"
+
+
+def test_step_on_one_item_measures_both_faces():
+    # a stepped block: its top at z 10 for x > 0 and z 8.5 for x < 0
+    block = Pos(-5, 0, 4.25) * Box(10, 10, 8.5) + Pos(5, 0, 5) * Box(10, 10, 10)
+    items = {"p": stand_in("p", block)}
+    step = pa.Step("s", "p", "p", (-5, 0, 20), (5, 0, 20), (0, 0, -1), 1.5, source="test")
+    result = ac.check_target(step, items)
+    assert result["status"] == "pass", result["message"]
+    assert result["measured"] == pytest.approx(1.5, abs=1e-6)
+
+
 # --- overlap sweep ------------------------------------------------------------------------------------------------
 
 

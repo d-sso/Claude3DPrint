@@ -266,3 +266,14 @@ def test_no_target_still_fails(boxlid):
     result = ac.check_target(battery_gap(), items)
     assert result["status"] == "fail"
     assert result["message"].startswith("no target:")
+
+
+def test_repeat_turns_nut_corners_with_the_copy():
+    # a nut about +Z, copied round +Z: its angle follows the rotation, so its corners stay aimed the same way
+    nuts = pa.repeat(pa.Nut("n", "M3", "hex", origin=(10, 0, 0), direction=(0, 0, 1), angle=10), pa.polar(4))
+    assert [round(n.angle % 360, 6) for n in nuts] == [10, 100, 190, 280]
+    # a nut along +X turned 90 degrees about +Z: its direction becomes +Y, and its corner (at angle 0 along +Z) stays
+    # along +Z, which is also the zero reference for +Y
+    turned = pa.repeat(pa.Nut("n", "M3", "hex", origin=(0, 0, 0), direction=(1, 0, 0)), [pa.place(rz=90)])[0]
+    assert approx3(turned.direction, (0, 1, 0))
+    assert turned.angle == pytest.approx(0.0, abs=1e-9)

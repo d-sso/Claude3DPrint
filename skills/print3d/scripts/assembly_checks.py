@@ -10,7 +10,10 @@ the head is at t > 0 and the shank runs down to t = -length.
 
 Bolted holes are looked for only within the screw's extent (t from the tip to 0): material beyond the tip (a blind
 hole's floor, a part further down the axis) neither blocks the screw nor counts as its hole. A thread or insert
-part's hole must start at least ENGAGE_PITCHES x pitch before the tip, and a nut must sit on the shank.
+part's hole must start at least ENGAGE_PITCHES x pitch before the tip; in a thread part only depths where the hole is
+narrower than the screw's major diameter (the pilot) count. A nut must sit on the shank, and the depths where it sits
+are not measured as any part's hole (that is its pocket, checked by NutPocket). A declared washer takes the head's
+seat (head on washer, washer on the part) and is left out of the shank's overlap check.
 
 Snaps are measured in 2D, in the snap plane's own frame: u across (perpendicular to insert_dir in the plane), v along
 the pull-out direction (-insert_dir), both from the declared point. Only material within SNAP_WINDOW of the point
@@ -18,8 +21,8 @@ counts, so the other snaps of the same parts don't. The bump region is the band 
 meets the catch's while it is pulled out; the running clearance is measured within CLEAR_MARGIN beside that band.
 
 A passage's stand-in is taken as straight: its run line goes through its bounding-box centre along the declared
-direction (or its longest bounding-box axis). The line must cross each part's material within the stand-in's extent
-and pass through an opening there (hole_on_axis), else "not found".
+direction (or its longest bounding-box axis). In each part, one opening the line passes through must lie within the
+stand-in's extent (assembly_geometry.passage_opening), else "not found".
 
 overlap_sweep(items, intended) reports every overlapping pair not in `intended` (see intended_overlaps), and
 check_target(target, items) measures one intent target; a target without a value fails with "no target:".
@@ -141,10 +144,10 @@ def _ring(frame, t, radius):
     return points
 
 
-def _first_surface(frame, t_start, radius, parts):
-    """The smallest distance down the axis (towards the tip) from t_start to a surface of parts, on a ring of rays:
-    (distance, part name), or (None, None) when no ray meets a part."""
-    down = tuple(-frame.z_dir)
+def _first_surface(frame, t_start, radius, parts, up=False):
+    """The smallest distance down the axis (towards the tip; up=True: towards the head) from t_start to a surface of
+    parts, on a ring of rays: (distance, part name), or (None, None) when no ray meets a part."""
+    down = tuple(frame.z_dir if up else -frame.z_dir)
     best = (None, None)
     for start in _ring(frame, t_start, radius):
         for name, shape in parts:
@@ -152,6 +155,29 @@ def _first_surface(frame, t_start, radius, parts):
             if hit is not None and (best[0] is None or hit < best[0]):
                 best = (hit, name)
     return best
+
+
+def _on_axis(item, height, axis_o, axis_d):
+    """A nut's or washer's (t_lo, t_hi) along the screw axis, its axis's offset from the screw axis, and its tilt in
+    degrees."""
+    origin, direction = (np.array(v) for v in item.axis())
+    rel = origin - axis_o
+    t0 = float(rel @ axis_d)
+    off_axis = float(np.linalg.norm(rel - t0 * axis_d))
+    tilt = math.degrees(math.acos(min(1.0, abs(float(direction @ axis_d)))))
+    t1 = t0 + height * float(direction @ axis_d)
+    return (min(t0, t1), max(t0, t1)), off_axis, tilt
+
+
+def _nut_skip(iface, items, axis_o, axis_d, limit):
+    """The depths where a coaxial nut sits, as a hole_on_axis skip range (none for an off-axis nut: fail safe)."""
+    if iface.nut is None:
+        return ()
+    nut = items[iface.nut]
+    span, off_axis, tilt = _on_axis(nut, _nut_height(nut.decl), axis_o, axis_d)
+    if off_axis > limit or tilt > PARALLEL_TOL:
+        return ()
+    return ((*span, "not measured: the nut sits here"),)
 
 
 def _check_bolted(iface, items):
@@ -171,9 +197,10 @@ def _check_bolted(iface, items):
     # (a) a hole on the axis in every part, (b) of a diameter that suits its role
     first_hole = None
     shank_span = (fast.tip, 0.0)  # only the screw's own extent along the axis counts: tip to seating plane
+    skip = _nut_skip(iface, items, axis_o, axis_d, limit)
     for name, role in iface.through:
         search_r = bolt_search_r(decl.size, role)
-        found = ag.hole_on_axis(items[name].shape, origin, direction, search_r=search_r, span=shank_span)
+        found = ag.hole_on_axis(items[name].shape, origin, direction, search_r=search_r, span=shank_span, skip=skip)
         measured["search_r"][name] = _num(search_r)
         measured["offset"][name] = _num(found.offset) if found.found else None
         measured["diameter"][name] = _num(found.diameter) if found.found else None
@@ -205,47 +232,65 @@ def _check_bolted(iface, items):
                     f"+/- {_fmt(ag.AXIS_LIMIT)} (insert_hole('{decl.size}'))"
                 )
         if role in ("thread", "insert"):
-            # the tip must run past the start of the hole (its head-side end) by ENGAGE_PITCHES x pitch
-            engaged, need = found.depth_span[1] - fast.tip, ENGAGE_PITCHES * fast.pitch
+            need = ENGAGE_PITCHES * fast.pitch
+            if role == "thread":  # only the pilot engages: depths narrower than the screw's major diameter
+                pilot = [hi - lo for lo, hi, _, diameter, _ in found.depths if diameter < _major_d(decl)]
+                engaged = sum(pilot)
+            else:  # the tip must run past the start of the hole (its head-side end) by ENGAGE_PITCHES x pitch
+                pilot, engaged = None, found.depth_span[1] - fast.tip
             measured.setdefault("engagement", {})[name] = _num(engaged)
             expected.setdefault("engagement_min", {})[name] = _num(need)
-            if engaged < need:
+            if pilot == []:
+                failures.append(
+                    f"not found: no pilot hole smaller than {decl.size} in {name} within the screw's extent "
+                    f"(t {_fmt(fast.tip)} to 0): its hole there is {_fmt(found.diameter)} mm or wider"
+                )
+            elif engaged < need:
                 failures.append(
                     f"{name}: screw engages {_fmt(engaged)} mm of the {role} hole, needs {_fmt(need)} "
                     f"({_fmt(ENGAGE_PITCHES)} x pitch {_fmt(fast.pitch)})"
                 )
 
-    # (c) the head seats
+    # (c) the head seats: on the parts, or on its washer
     head_local, shank_local = _head_and_shank(decl)
     head_solid = head_local.moved(screw.loc)
     parts = [(name, items[name].shape) for name, _ in iface.through]
-    head_overlap = {name: _num(ag.overlap(head_solid, shape)[0]) for name, shape in parts}
+    under = [(iface.washer, items[iface.washer].shape)] if iface.washer else []
+    head_overlap = {name: _num(ag.overlap(head_solid, shape)[0]) for name, shape in parts + under}
     measured["head_overlap_mm3"] = head_overlap
     expected["overlap_max"] = ag.OVERLAP_EPS
     for name, volume in head_overlap.items():
         if volume > 0:
             failures.append(f"{iface.screw}: head overlaps {name} by {_fmt(volume)} mm^3")
     if decl.kind == "countersunk":
+        if iface.washer:
+            failures.append(f"{iface.screw}: a countersunk head doesn't seat on a washer ({iface.washer})")
         _countersunk_seat(iface, decl, frame, head, head_solid, parts, measured, expected, failures)
     else:
-        ring_r = (clearance / 2 + head["dk"] / 2) / 2  # between the hole's edge and the head's
-        hit, _ = _first_surface(frame, fast.head_top, ring_r, parts)
+        inner = clearance / 2
+        if iface.washer:
+            inner = max(inner, hardware.WASHERS[items[iface.washer].decl.size]["d1"] / 2)
+        ring_r = (inner + head["dk"] / 2) / 2  # between the hole's (or washer bore's) edge and the head's
+        hit, _ = _first_surface(frame, fast.head_top, ring_r, under or parts)
         gap = None if hit is None else hit - fast.head_top
         measured["head_gap"] = _num(gap)
         expected["head_gap_max"] = ag.CONTACT_LIMIT
+        surface = f"washer {iface.washer}" if iface.washer else "the part surface"
         if gap is None:
-            failures.append(f"not found: no part surface under the head of {iface.screw}")
+            failures.append(f"not found: no surface of {surface} under the head of {iface.screw}")
         elif gap > ag.CONTACT_LIMIT:
             failures.append(
-                f"{iface.screw}: head {_fmt(gap)} mm above the part surface (limit {_fmt(ag.CONTACT_LIMIT)})"
+                f"{iface.screw}: head {_fmt(gap)} mm above {surface} (limit {_fmt(ag.CONTACT_LIMIT)})"
             )
+    _washers(iface, items, frame, axis_o, axis_d, limit, clearance, parts, measured, expected, failures)
 
     # (d) length past the nut
     if iface.nut is not None:
         _protrusion(iface, decl, fast, items[iface.nut], axis_o, axis_d, limit, measured, expected, failures)
 
-    # (e) the shank clears everything but the nut and the parts it threads into
-    skip = {iface.screw, iface.nut} | {name for name, role in iface.through if role in ("thread", "insert")}
+    # (e) the shank clears everything but the nut, its washers and the parts it threads into
+    skip = {iface.screw, iface.nut, iface.washer, iface.nut_washer}
+    skip |= {name for name, role in iface.through if role in ("thread", "insert")}
     shank = shank_local.moved(screw.loc)
     shank_overlap = {}
     for name, item in items.items():
@@ -260,12 +305,55 @@ def _check_bolted(iface, items):
     location = axis_o - axis_d * (decl.length / 2)
     across_t = (first_hole[0] + first_hole[1]) / 2 if first_hole else -min(1.0, decl.length / 2)
     planes = [(tuple(location), tuple(frame.y_dir)), (tuple(axis_o + axis_d * across_t), tuple(axis_d))]
-    names = [iface.screw, *(name for name, _ in iface.through), *([iface.nut] if iface.nut else [])]
+    names = [iface.screw, *(name for name, _ in iface.through),
+             *(name for name in (iface.washer, iface.nut, iface.nut_washer) if name)]
     through = ", ".join(name for name, _ in iface.through)
     passed = f"M{decl.size[1:]}x{_fmt(decl.length)} {decl.kind} through {through}: holes on axis, head seated"
     if iface.nut:
         passed += f", {_fmt(measured['protrusion'])} mm past the nut"
     return _result(iface, names, _sorted_failures(failures), measured, expected, location, planes, passed)
+
+
+def _major_d(decl):
+    """The screw's major (nominal) diameter."""
+    return float(decl.size[1:])
+
+
+def _washers(iface, items, frame, axis_o, axis_d, limit, clearance, parts, measured, expected, failures):
+    """Each declared washer is coaxial, overlaps no part, and touches the part surface it sits on: under a head
+    washer (towards the tip) or above a nut washer (towards the head)."""
+    measured["washers"] = {}
+    for name, side in ((iface.washer, "head"), (iface.nut_washer, "nut")):
+        if name is None:
+            continue
+        washer = items[name]
+        size = hardware.WASHERS[washer.decl.size]
+        (t_lo, t_hi), off_axis, tilt = _on_axis(washer, size["h"], axis_o, axis_d)
+        overlaps = {part: _num(ag.overlap(washer.shape, shape)[0]) for part, shape in parts}
+        ring_r = (max(clearance / 2, size["d1"] / 2) + size["d2"] / 2) / 2  # between the hole's edge and its rim
+        if side == "head":
+            hit, _ = _first_surface(frame, t_lo, ring_r, parts)
+        else:
+            hit, _ = _first_surface(frame, t_hi, ring_r, parts, up=True)
+        measured["washers"][name] = {"side": side, "span": [_num(t_lo), _num(t_hi)], "axis_offset": _num(off_axis),
+                                     "gap": _num(hit), "overlap_mm3": overlaps}
+        if off_axis > limit or tilt > PARALLEL_TOL:
+            failures.append(
+                f"{name}: washer axis {_fmt(off_axis)} mm from the screw axis, {_fmt(tilt)} deg off parallel "
+                f"(limit {_fmt(limit)} mm)"
+            )
+        for part, volume in overlaps.items():
+            if volume > 0:
+                failures.append(f"{name}: washer overlaps {part} by {_fmt(volume)} mm^3")
+        if hit is None:
+            where = "under" if side == "head" else "above"
+            failures.append(f"not found: no part surface {where} washer {name} of {iface.screw}")
+        elif hit > ag.CONTACT_LIMIT:
+            failures.append(
+                f"{name}: washer {_fmt(hit)} mm from the part surface (limit {_fmt(ag.CONTACT_LIMIT)})"
+            )
+    if measured["washers"]:
+        expected["washer_gap_max"] = ag.CONTACT_LIMIT
 
 
 def _countersunk_seat(iface, decl, frame, head, cone, parts, measured, expected, failures):
@@ -297,19 +385,13 @@ def _countersunk_seat(iface, decl, frame, head, cone, parts, measured, expected,
 
 def _protrusion(iface, decl, fast, nut, axis_o, axis_d, limit, measured, expected, failures):
     """How far the tip passes the nut's far face (the face away from the head), along the screw axis."""
-    nut_o, nut_d = (np.array(v) for v in nut.axis())
-    rel = nut_o - axis_o
-    t0 = float(rel @ axis_d)
-    off_axis = float(np.linalg.norm(rel - t0 * axis_d))
-    tilt = math.degrees(math.acos(min(1.0, abs(float(nut_d @ axis_d)))))
+    (far, near), off_axis, tilt = _on_axis(nut, _nut_height(nut.decl), axis_o, axis_d)
     measured["nut_axis_offset"] = _num(off_axis)
     if off_axis > limit or tilt > PARALLEL_TOL:
         failures.append(
             f"{iface.nut}: nut axis {_fmt(off_axis)} mm from the screw axis, {_fmt(tilt)} deg off parallel "
             f"(limit {_fmt(limit)} mm)"
         )
-    t1 = t0 + _nut_height(nut.decl) * float(nut_d @ axis_d)
-    far, near = min(t0, t1), max(t0, t1)
     measured["nut_span"] = [_num(far), _num(near)]
     if near > ag.RAY_TOL:  # a nut beyond the tip is "too short" below; one above the seating plane isn't on the shank
         failures.append(
@@ -552,39 +634,28 @@ def _run_line(iface, item):
     return centre, direction, (local.min.Z, local.max.Z), (local.size.X, local.size.Y)
 
 
-def _passes_through(part, centre, direction, extent, search_r):
-    """None when the run line crosses the part's material near it within the stand-in's extent, and that material
-    is an opening round the line; otherwise why not."""
-    local = Plane(origin=centre, z_dir=direction).to_local_coords(part)
-    box = local.bounding_box()
-    near = ag._clip(local, search_r, box.min.Z - 1.0, box.max.Z + 1.0)
-    if near is None:
-        return f"no material within {_fmt(search_r)} mm of its run line"
-    lo, hi = near.bounding_box().min.Z, near.bounding_box().max.Z
-    if lo < extent[0] - ag.RAY_TOL or hi > extent[1] + ag.RAY_TOL:
-        return (f"it runs from {_fmt(extent[0])} to {_fmt(extent[1])} mm along its line, the material near the line "
-                f"from {_fmt(lo)} to {_fmt(hi)}")
-    found = ag.hole_on_axis(part, centre, direction, search_r=search_r, span=extent)
-    return None if found.found else found.reason
-
-
 def _check_passage(iface, items):
     """Stand-ins are taken as straight: one run line through the bounding-box centre along `direction`."""
     item = items[iface.item]
     centre, direction, extent, cross = _run_line(iface, item)
     search_r = passage_search_r(*cross, iface.min_clearance)
     failures = []
-    measured = {"overlap_mm3": {}, "clearance": {}, "direction": [_num(v, 6) for v in direction],
+    measured = {"overlap_mm3": {}, "clearance": {}, "opening": {}, "aperture": {},
+                "direction": [_num(v, 6) for v in direction], "extent": [_num(v) for v in extent],
                 "search_r": _num(search_r)}
     for name in iface.through:
         part = items[name].shape
         if not ag._boxes_meet(item.shape, part):
             failures.append(f"not found: {iface.item} doesn't reach {name} (their bounding boxes don't meet)")
             measured["overlap_mm3"][name] = measured["clearance"][name] = None
+            measured["opening"][name] = measured["aperture"][name] = None
             continue
-        why = _passes_through(part, centre, direction, extent, search_r)
-        if why:
-            failures.append(f"not found: {iface.item} doesn't pass through an opening of {name} ({why})")
+        opening = ag.passage_opening(part, centre, direction, search_r=search_r, extent=extent)
+        measured["opening"][name] = [_num(v) for v in opening.span] if opening.found else None
+        measured["aperture"][name] = _num(opening.diameter) if opening.found else None
+        if not opening.found:
+            failures.append(f"not found: {iface.item} doesn't pass through an opening of {name} ({opening.reason}; "
+                            f"depths are along its line from its centre)")
         volume = ag.overlap(item.shape, part)[0]
         clearance = 0.0 if volume > 0 else item.shape.distance_to(part)
         measured["overlap_mm3"][name], measured["clearance"][name] = _num(volume), _num(clearance)
@@ -610,13 +681,19 @@ def _closest(a, b):
 
 
 def _check_clear(iface, items):
-    distance, location, direction = _closest(items[iface.a].shape, items[iface.b].shape)
+    """Any overlap fails, whatever min_distance is (min_distance=0 means "no overlap, touching allowed")."""
+    a, b = items[iface.a].shape, items[iface.b].shape
+    volume = ag.overlap(a, b)[0]
+    distance, location, direction = _closest(a, b)
     failures = []
-    if distance < iface.min_distance:
+    if volume > 0:
+        failures.append(f"{iface.a} overlaps {iface.b} by {_fmt(volume)} mm^3")
+    elif distance < iface.min_distance:
         failures.append(f"{iface.a} is {_fmt(distance)} mm from {iface.b}, needs at least {_fmt(iface.min_distance)}")
     passed = f"{iface.a} keeps {_fmt(distance)} mm from {iface.b}"
-    return _result(iface, [iface.a, iface.b], failures, {"distance": _num(distance)},
-                   {"min_distance": iface.min_distance}, location, [(location, direction)], passed)
+    return _result(iface, [iface.a, iface.b], failures, {"distance": _num(distance), "overlap_mm3": _num(volume)},
+                   {"min_distance": iface.min_distance, "overlap_max": ag.OVERLAP_EPS}, location,
+                   [(location, direction)], passed)
 
 
 # --- overlap sweep ------------------------------------------------------------------------------------------------
@@ -712,14 +789,14 @@ def _measure_gap(target, items):
 
 def _measure_step(target, items):
     names = [target.a, target.b]
-    hits = {}
+    hits = []  # one per probe, in order: a and b may be the same item
     for name, origin in ((target.a, target.origin_a), (target.b, target.origin_b)):
-        hits[name] = ag.probe(items[name].shape, origin, target.direction)
-        if hits[name] is None:
+        hits.append(ag.probe(items[name].shape, origin, target.direction))
+        if hits[-1] is None:
             reason = f"the probe from {_point(origin)} along {_point(target.direction)} misses {name}"
             return names, None, origin, reason
-    location = np.array(target.origin_a) + np.array(target.direction) * hits[target.a]
-    return names, hits[target.a] - hits[target.b], tuple(location), None
+    location = np.array(target.origin_a) + np.array(target.direction) * hits[0]
+    return names, hits[0] - hits[1], tuple(location), None
 
 
 def _measure_position(target, items):
