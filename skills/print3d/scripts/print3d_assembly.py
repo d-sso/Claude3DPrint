@@ -363,7 +363,8 @@ class Snap:
     """A bump on `bump` into a catch on `catch`, checked in the section through `point` with this `normal`.
 
     `insert_dir` is the direction the bump part moves to snap in. `engagement` and `clearance` are (min, max)
-    in mm or None; `fit` optionally names a profile fit to report alongside; `travel` is how far to slide back.
+    in mm or None; a None engagement fails the check as "no target" (a None clearance is just not checked).
+    `fit` optionally names a profile fit to report alongside; `travel` is how far to slide back.
     """
 
     name: str

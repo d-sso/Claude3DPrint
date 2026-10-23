@@ -67,6 +67,24 @@ def test_snap_engagement_out_of_range(boxlid):
     assert "engagement 0.35" in result["message"]
 
 
+def test_snap_without_engagement_range_has_no_target(boxlid):
+    unit, items, _ = boxlid
+    snap = dataclasses.replace(interface(unit, "snap-front"), engagement=None)
+    result = ac.check_interface(snap, items)
+    assert result["status"] == "fail"
+    assert result["message"].startswith(
+        "no target: snap-front has no engagement range; ask the user (fixture.md § Snap)")
+    assert result["measured"]["engagement"] == pytest.approx(0.35, abs=0.05)  # still measured and reported
+
+
+def test_snap_without_clearance_range_still_passes(boxlid):
+    unit, items, _ = boxlid
+    snap = dataclasses.replace(interface(unit, "snap-front"), clearance=None)
+    result = ac.check_interface(snap, items)
+    assert result["status"] == "pass", result["message"]
+    assert result["expected"]["clearance"] is None
+
+
 def test_snap_fit_reported(boxlid):
     unit, items, _ = boxlid
     snap = dataclasses.replace(interface(unit, "snap-front"), fit="sliding")
@@ -424,6 +442,19 @@ def test_step_on_one_item_measures_both_faces():
     assert result["status"] == "pass", result["message"]
     assert result["measured"] == pytest.approx(1.5, abs=1e-6)
     assert result["items"] == ["p"]
+
+
+def test_step_counts_the_origin_offset():
+    # a's top at z 3, b's top at z 5: probed from origins 2 mm apart along the probe, b's face is 2 mm above a's
+    items = {"a": stand_in("a", Pos(0, 0, 1.5) * Box(10, 10, 3)), "b": stand_in("b", Pos(20, 0, 2.5) * Box(10, 10, 5))}
+    step = pa.Step("s", "a", "b", (0, 0, 10), (20, 0, 12), (0, 0, -1), 2.0, source="test")
+    result = ac.check_target(step, items)
+    assert result["measured"] == pytest.approx(2.0, abs=1e-6)
+    assert result["status"] == "pass", result["message"]
+    level = pa.Step("s", "a", "b", (0, 0, 10), (20, 0, 10), (0, 0, -1), 2.0, source="test")  # level origins
+    assert ac.check_target(level, items)["measured"] == pytest.approx(2.0, abs=1e-6)
+    flush = pa.Step("s", "a", "b", (0, 0, 10), (20, 0, 12), (0, 0, -1), 0.0, source="test")
+    assert ac.check_target(flush, items)["status"] == "fail"
 
 
 # --- overlap sweep ------------------------------------------------------------------------------------------------

@@ -167,20 +167,23 @@ def stand_in(name, shape):
 
 
 def countersunk_joint(top_z):
-    """An M3 countersunk screw (head top at 10) into a 6 mm plate (z 4..10 shifted by top_z - 10) with a 90° sink."""
+    """An M3x10 countersunk screw (head top at 10) through a 6 mm plate (z 4..10 shifted by top_z - 10) with a 90°
+    sink, into a 4 mm thread block with a 2.5 mm pilot under it."""
     plate = Pos(0, 0, top_z - 6) * Box(20, 20, 6, align=MIN_Z)
     plate -= Pos(0, 0, top_z - 6) * Cylinder(1.8, 6, align=MIN_Z)
     plate -= Pos(0, 0, top_z - 1.5) * Cone(1.5, 3.0, 1.5, align=MIN_Z)  # 90 degrees: radius 1.5 -> 3.0 over 1.5
-    screw = pa.Screw("screw", "M3", "countersunk", 6.0, origin=(0, 0, 10), direction=(0, 0, 1))
-    items = {"plate": stand_in("plate", plate), "screw": assemble_model.place_simple(screw)}
-    return items, pa.Bolted("joint", "screw", [("plate", "clearance")], source="test")
+    base = Pos(0, 0, top_z - 10) * (Box(20, 20, 4, align=MIN_Z) - Cylinder(1.25, 4, align=MIN_Z))
+    screw = pa.Screw("screw", "M3", "countersunk", 10.0, origin=(0, 0, 10), direction=(0, 0, 1))
+    items = {"plate": stand_in("plate", plate), "base": stand_in("base", base),
+             "screw": assemble_model.place_simple(screw)}
+    return items, pa.Bolted("joint", "screw", [("plate", "clearance"), ("base", "thread")], source="test")
 
 
 def test_countersunk_seat_pass():
     items, bolt = countersunk_joint(10.0)
     result = ac.check_interface(bolt, items)
     assert result["status"] == "pass", result["message"]
-    assert result["measured"]["head_overlap_mm3"] == {"plate": 0.0}
+    assert result["measured"]["head_overlap_mm3"] == {"plate": 0.0, "base": 0.0}
     assert result["measured"]["head_flush"] == pytest.approx(0.0, abs=0.01)
 
 
@@ -190,6 +193,14 @@ def test_countersunk_proud_fails():
     assert result["status"] == "fail"
     assert "countersunk head" in result["message"]
     assert result["measured"]["head_flush"] == pytest.approx(-0.5, abs=0.01)
+
+
+def test_bolted_with_nothing_engaging_the_screw_fails():
+    # an M3x12 through a 3 mm clearance plate: no nut, no thread or insert part holds it
+    items, bolt = joint({"plate": (holed_plate(10), "clearance")}, 12.0)
+    result = ac.check_interface(bolt, items)
+    assert result["status"] == "fail"
+    assert result["message"].startswith("not found: nothing engages screw (no nut, thread or insert part)")
 
 
 def test_shank_overlap_and_thread_role():
@@ -387,13 +398,16 @@ def test_nut_angle_validated():
 
 
 def washer_joint(lift=0.0, declare=True):
-    """An M3 socket screw on an M3 washer (0.5 thick) on a 3 mm plate (z 10..13); `lift` raises washer and screw."""
+    """An M3x6 socket screw on an M3 washer (0.5 thick) on a 3 mm plate (z 10..13), its tip in a thread block with a
+    2.5 mm pilot under the plate (z 6..10); `lift` raises washer and screw."""
     top = 13.0 + lift
     screw = pa.Screw("screw", "M3", "socket", 6.0, origin=(0, 0, top + 0.5), direction=(0, 0, 1))
     washer = pa.Washer("washer", "M3", origin=(0, 0, top), direction=(0, 0, 1))
-    items = {"plate": stand_in("plate", holed_plate(10)), "screw": assemble_model.place_simple(screw),
-             "washer": assemble_model.place_simple(washer)}
-    bolt = pa.Bolted("j", "screw", [("plate", "clearance")], washer="washer" if declare else None, source="test")
+    base = Pos(0, 0, 6) * (Box(20, 20, 4, align=MIN_Z) - Cylinder(1.25, 4, align=MIN_Z))
+    items = {"plate": stand_in("plate", holed_plate(10)), "base": stand_in("base", base),
+             "screw": assemble_model.place_simple(screw), "washer": assemble_model.place_simple(washer)}
+    bolt = pa.Bolted("j", "screw", [("plate", "clearance"), ("base", "thread")],
+                     washer="washer" if declare else None, source="test")
     return items, bolt
 
 

@@ -15,11 +15,13 @@ narrower than the screw's major diameter (the pilot) count. A nut must sit on th
 are not measured as any part's hole (that is its pocket, checked by NutPocket); nor, in the part holding it, are the
 depths where the hole is its tunnel (at least the nut's across-flats - TUNNEL_TOL wide). A declared washer takes the
 head's seat (head on washer, washer on the part) and is left out of the shank's overlap check.
+Something must engage the screw: a Bolted with no nut and no thread or insert part fails as "not found:".
 
 Snaps are measured in 2D, in the snap plane's own frame: u across (perpendicular to insert_dir in the plane), v along
 the pull-out direction (-insert_dir), both from the declared point. Only material within SNAP_WINDOW of the point
 counts, so the other snaps of the same parts don't. The bump region is the band of v where the bump part's section
 meets the catch's while it is pulled out; the running clearance is measured within CLEAR_MARGIN beside that band.
+A snap without an engagement range fails as "no target:".
 
 A passage's stand-in is taken as straight: its run line goes through its bounding-box centre along the declared
 direction (or its longest bounding-box axis). In each part, one opening the line passes through must lie within the
@@ -69,14 +71,14 @@ def _fmt(value):
     return f"{round(float(value), 2):g}"
 
 
-def _type_name(iface):
+def type_name(iface):
     return re.sub(r"(?<!^)(?=[A-Z])", "_", type(iface).__name__).lower()
 
 
 def _result(iface, names, failures, measured, expected, location, planes, passed):
     return {
         "name": iface.name,
-        "type": _type_name(iface),
+        "type": type_name(iface),
         "items": list(names),
         "status": "fail" if failures else "pass",
         "measured": measured,
@@ -279,6 +281,9 @@ def _check_bolted(iface, items, interfaces=None):
                     f"{name}: screw engages {_fmt(engaged)} mm of the {role} hole, needs {_fmt(need)} "
                     f"({_fmt(ENGAGE_PITCHES)} x pitch {_fmt(fast.pitch)})"
                 )
+
+    if iface.nut is None and not any(role in ("thread", "insert") for _, role in iface.through):
+        failures.append(f"not found: nothing engages {iface.screw} (no nut, thread or insert part)")
 
     # (c) the head seats: on the parts, or on its washer
     head_local, shank_local = _head_and_shank(decl)
@@ -485,7 +490,6 @@ def _check_nut_pocket(iface, items):
                    passed)
 
 
-
 # --- snap ---------------------------------------------------------------------------------------------------------
 
 
@@ -579,6 +583,8 @@ def _check_snap(iface, items):
                 "bump_band": None}
     if volume > 0:
         failures.append(f"{iface.bump} overlaps {iface.catch} by {_fmt(volume)} mm^3")
+    if iface.engagement is None:  # a None clearance stays optional; engagement is what the snap is for
+        failures.append(f"no target: {iface.name} has no engagement range; ask the user ({iface.source})")
     if all(sections.values()):
         width, band = _pull_out(sections[iface.bump], sections[iface.catch], iface.travel)
         measured["engagement"] = _num(width)
@@ -825,8 +831,12 @@ def _measure_step(target, items):
         if hits[-1] is None:
             reason = f"the probe from {_point(origin)} along {_point(target.direction)} misses {name}"
             return names, None, origin, reason
-    location = np.array(target.origin_a) + np.array(target.direction) * hits[0]
-    return names, hits[0] - hits[1], tuple(location), None
+    d = np.array(target.direction) / np.linalg.norm(target.direction)
+    # the faces' positions along d, so origins at different depths along it count: (o_a.d + hit_a) - (o_b.d + hit_b)
+    face_a = np.array(target.origin_a) @ d + hits[0]
+    face_b = np.array(target.origin_b) @ d + hits[1]
+    location = np.array(target.origin_a) + d * hits[0]
+    return names, float(face_a - face_b), tuple(location), None
 
 
 def _measure_position(target, items):
@@ -871,7 +881,7 @@ def check_target(target, items) -> dict:
             f"measured {_fmt(value)} mm, target {_fmt(target.value)} +/- {_fmt(target.tol)} ({target.source}): "
             + disagree
         )
-    kind = _type_name(target)
+    kind = type_name(target)
     if bounded and value is not None:
         if lo is not None and value < lo:
             failures.append(f"{kind} {_fmt(value)} mm is below the minimum {_fmt(lo)} ({target.source}): {disagree}")

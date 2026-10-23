@@ -28,6 +28,7 @@ HEADS = {
         "M5": {"dk": 8.5, "k": 5.0},
     },
     # DIN 7991 countersunk (flat) head socket screw, 90 degree head; the standard starts at M3
+    # ISO 10642 heads are larger (dk up to 6.72 for M3 against 6.0 here), so a countersink should leave room
     "countersunk": {
         "M3": {"dk": 6.0, "k": 1.7},
         "M4": {"dk": 8.0, "k": 2.3},

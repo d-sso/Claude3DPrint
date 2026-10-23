@@ -108,6 +108,21 @@ def test_interfaces_outside_exact_are_skipped(row):
     assert all(r["name"] != "clear-34" for r in result["interfaces"])
 
 
+def test_skipped_layout_interfaces_warn(row):
+    assembly, items, builder = row
+    clear34 = pa.Clear("clear-34", "c3.block", "c4.block", 0.3, source="test")
+    clear_c4 = pa.Clear("clear-c4", "c4.block", "c3.block", 0.5, source="test")
+    layout = dataclasses.replace(assembly.layouts[0], interfaces=(clear34, clear_c4),
+                                 overrides={"c3": {"block": {"slot_dz": 0.5}}})  # an instance skip isn't counted
+    result = {"warnings": []}
+    assemble_model._stage_check(assembly, builder, items, [], [layout], result)
+    assert result["warnings"] == [
+        "layout row: 2 interfaces skipped (not in the exact subset); they are not checked"]
+    result = {"warnings": []}
+    assemble_model._stage_check(assembly, builder, items, [], [assembly.layouts[0]], result)
+    assert result["warnings"] == []
+
+
 def test_override_outside_exact_is_reported(row):
     result = check(row, overrides={"c3": {"block": {"slot_dz": 0.5}}})
     assert [s["name"] for s in result["skipped"]] == ["c3"]

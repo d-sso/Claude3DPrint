@@ -437,7 +437,7 @@ def check_layout(layout, unit_items, builder=None, *, units) -> dict:
             missing = sorted({_instance_of(n) for n in outside})
             skipped.append({
                 "name": iface.name,
-                "type": ac._type_name(iface),
+                "type": ac.type_name(iface),
                 "items": names,
                 "reason": f"{', '.join(outside)} not in the exact subset ({', '.join(layout.exact) or 'none'}); "
                           f"add {', '.join(missing)} to exact to check it",
@@ -795,6 +795,11 @@ def _stage_check(assembly, builder, unit_items, unit_list, layout_list, result):
     result["units"] = [check_unit(u, unit_items[u.name]) for u in unit_list]
     result["layouts"] = [{**check_layout(lay, unit_items, builder, units=assembly.units), "sheets": {}}
                          for lay in layout_list]
+    for group in result["layouts"]:
+        count = sum(entry["type"] != "instance" for entry in group["skipped"])
+        if count:
+            result["warnings"].append(f"layout {group['name']}: {count} interfaces skipped (not in the exact subset); "
+                                      "they are not checked")
     groups = result["units"] + result["layouts"]
     for group in groups:
         for entry in group["interfaces"] + group["overlaps"]:
