@@ -152,12 +152,16 @@ def _choice(obj, fld, valid):
         raise ValueError(f"{_where(obj, fld)} is {value!r}; valid: {', '.join(map(str, valid))}")
 
 
-def _look(obj):
-    """Validate `material` and `glow` (positive, emissive only), which every item shares."""
+def _look(obj, *, partial=False):
+    """Validate `material` and `glow` (positive, emissive only), which every item shares.
+
+    partial: a Layout.looks entry, merged over the item's own look later, may give `glow` without `material`
+    (the merged look is checked when the scene is made).
+    """
     if obj.material is not None:
         _choice(obj, "material", MATERIALS)
     obj.glow = _num_field(obj, "glow", optional=True, positive=True)
-    if obj.glow is not None and obj.material != "emissive":
+    if obj.glow is not None and obj.material != "emissive" and not (partial and obj.material is None):
         raise ValueError(f"{_where(obj, 'glow')} is only for material='emissive', got material {obj.material!r}")
 
 
@@ -721,12 +725,12 @@ def _render(obj):
 
 
 class _LookProbe:
-    """One look entry run through the item checks; `name` labels the errors."""
+    """One look entry run through the item checks; `name` labels the errors. partial: see _look."""
 
-    def __init__(self, name, color=None, material=None, glow=None):
+    def __init__(self, name, color=None, material=None, glow=None, *, partial=False):
         self.name, self.color, self.material, self.glow = name, color, material, glow
         self.color = _color(self)
-        _look(self)
+        _look(self, partial=partial)
 
 
 @dataclass
@@ -835,7 +839,7 @@ class Layout:
                 bad = [k for k in values if k not in LOOK_KEYS]
                 if bad:
                     raise ValueError(f"{where}: unknown key {bad[0]!r}; valid: {', '.join(LOOK_KEYS)}")
-                probe = _LookProbe(where, **values)
+                probe = _LookProbe(where, **values, partial=True)
                 checked[inst][item] = {k: getattr(probe, k) for k in LOOK_KEYS if k in values}
         self.looks = checked
 
