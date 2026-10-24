@@ -438,7 +438,8 @@ def build(scene, folder, quality, resolution, samples):
     Collections assembled, exploded (only when an offset is non-zero), tools, backdrop-<state> (one floor or wall
     per state, at that state's bbox) and cameras are linked into the scenes studio, hard and dim; each scene adds
     its own lights-<lighting> collection and World, and has the view layers assembled, exploded and tools. Cameras
-    cam-<view> are framed on the assembled state (cam-tools on the tools state). Returns (engine, device, bbox per state, cameras, aspect).
+    cam-<view> are framed on the assembled state (cam-tools on the tools state). Returns (engine, device, bbox per
+    state, cameras, aspect).
     """
     import bpy
     bpy.ops.wm.read_factory_settings(use_empty=True)

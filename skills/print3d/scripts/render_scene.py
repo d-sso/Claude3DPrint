@@ -217,8 +217,9 @@ def render(path, set_pairs=(), level="all", unit=None, layout=None, quality="dra
 
     Every selected group's previous PNGs and scene.blend are removed before any group renders (also when the run
     then fails), so none sits next to a newer result. A group's staging folder (<folder>/_staging) is removed after
-    a successful render and kept after a failed one, for debugging. blender: the executable (None: find_blender(config), config being the loaded
-    config.toml). open_gui: launch Blender on the first .blend after a successful run.
+    a successful render and kept after a failed one, for debugging. blender: the executable (None:
+    find_blender(config), config being the loaded config.toml). open_gui: launch Blender on the first .blend after
+    a successful run.
     """
     path = Path(path).resolve()
     result = {
