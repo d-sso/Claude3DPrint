@@ -225,7 +225,7 @@ def test_rendering_md_is_generic():
     text = read(SKILL / "references" / "rendering.md")
     # whole words: the state name "assembled" legitimately contains "led"
     for word in ("LED", "LEDPanel", "tile", "zone"):
-        assert not re.search(rf"{word}s?", text, re.IGNORECASE), word
+        assert not re.search(rf"\b{word}s?\b", text, re.IGNORECASE), word
 
 
 def test_readme_blender_lookup_names_config_key():
