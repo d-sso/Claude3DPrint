@@ -1,10 +1,8 @@
 """blender_scene run inside a real Blender: the .blend layout, the stills and the result line.
 
-Skipped when Blender isn't installed. Blender is found from PRINT3D_BLENDER, then the default install folder.
+Skipped when Blender isn't installed. Blender is found as `print3d render` finds it (render_scene.find_blender).
 """
-import glob
 import json
-import os
 import struct
 import subprocess
 import textwrap
@@ -12,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+import render_scene
 import scene_model as sm
 from conftest import FIXTURES, SCRIPTS
 
@@ -22,15 +21,7 @@ BOXLID = FIXTURES / "assembly" / "boxlid"
 TIMEOUT_S = 900
 
 
-def _blender():
-    env = os.environ.get("PRINT3D_BLENDER")
-    if env:
-        return Path(env) if Path(env).is_file() else None
-    found = sorted(glob.glob("C:/Program Files/Blender Foundation/Blender */blender.exe"), reverse=True)
-    return Path(found[0]) if found else None
-
-
-BLENDER = _blender()
+BLENDER = render_scene.find_blender({})
 if BLENDER is None:
     pytest.skip("Blender not found", allow_module_level=True)
 
@@ -42,9 +33,9 @@ def run_blender(*args, python=SCRIPT):
 
 
 def result_of(proc):
-    lines = proc.stdout.strip().splitlines()
-    assert lines and lines[-1].startswith("PRINT3D_RESULT "), proc.stdout[-3000:] + proc.stderr[-3000:]
-    return json.loads(lines[-1][len("PRINT3D_RESULT "):])
+    res = render_scene.parse_result(proc.stdout)
+    assert res is not None, proc.stdout[-3000:] + proc.stderr[-3000:]
+    return res
 
 
 def png_size(path):
@@ -138,3 +129,34 @@ def test_final_quality_uses_cycles(staged, tmp_path):
     assert res["engine"] == "CYCLES" and res["device"]
     assert [s["path"] for s in res["stills"]] == [str(png)]
     assert png_size(png) == (64, 48) and blend.is_file()
+
+
+GLOW_UNIT = textwrap.dedent("""
+    from build123d import Box
+
+    from print3d_assembly import Assembly, StandIn, Unit, place
+
+
+    def build_assembly(a):
+        return Assembly([Unit("glow", [
+            StandIn("strip", Box(18, 4, 2), color=(255, 200, 120), material="emissive", glow=20),
+            StandIn("diffuser", Box(24, 10, 1), at=place(z=4), color=(240, 240, 240), material="translucent"),
+        ])])
+""")
+
+
+def test_translucent_and_emissive_render(tmp_path, monkeypatch):
+    monkeypatch.setenv("PRINT3D_CONFIG", str(tmp_path / "no-config.toml"))
+    project = tmp_path / "glow"
+    project.mkdir()
+    (project / "assembly.py").write_text(GLOW_UNIT, encoding="utf-8")
+    (group,), _ = sm.load_groups(project / "assembly.py", (), "all", None, None, None)
+    assert {o.look.material for o in group.objects} == {"emissive", "translucent"}
+    staged_json = sm.write_staging(group, tmp_path / "stage")
+    pngs = {lighting: tmp_path / f"assembled-iso-{lighting}.png" for lighting in ("studio", "dim")}
+    proc = run_blender(staged_json, "--resolution", "64x48", "--samples", "4", "--blend", tmp_path / "glow.blend",
+                       *[a for lighting, png in pngs.items() for a in ("--still", f"assembled:iso:{lighting}={png}")])
+    res = result_of(proc)
+    assert res["ok"], res
+    for png in pngs.values():
+        assert png_size(png) == (64, 48)
