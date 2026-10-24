@@ -101,5 +101,19 @@ def test_parse_args_defaults():
 
 
 def test_module_imports_without_bpy():
+    import ast
     import sys
     assert "bpy" not in sys.modules
+    tree = ast.parse(open(bs.__file__, encoding="utf-8").read())
+    top = set()
+    todo = list(tree.body)
+    while todo:  # everything that runs at import time; function bodies are skipped
+        node = todo.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if isinstance(node, ast.Import):
+            top |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            top.add((node.module or "").split(".")[0])
+        todo.extend(ast.iter_child_nodes(node))
+    assert not top & {"bpy", "mathutils"}, top
