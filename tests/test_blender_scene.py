@@ -160,3 +160,65 @@ def test_translucent_and_emissive_render(tmp_path, monkeypatch):
     assert res["ok"], res
     for png in pngs.values():
         assert png_size(png) == (64, 48)
+
+
+UNDER_UNIT = textwrap.dedent("""
+    from build123d import Box
+
+    from print3d_assembly import Assembly, Screw, StandIn, Unit, place
+
+
+    def build_assembly(a):
+        return Assembly([Unit("under", [
+            StandIn("plate", Box(30, 30, 4), at=place(z=2)),
+            Screw("screw", "M3", "socket", 8.0, origin=(0, 0, 0), direction=(0, 0, -1)),
+        ])])
+""")
+
+BACKDROP_INSPECT = textwrap.dedent("""
+    import json
+    import bpy
+    from mathutils import Vector
+    out = {}
+    sc = bpy.data.scenes["studio"]
+    for layer in sc.view_layers:
+        lows, backdrops = [], []
+        for o in sc.objects:
+            if o.type != "MESH" or not o.visible_get(view_layer=layer):
+                continue
+            # matrix_basis, not matrix_world: a reloaded file's objects in collections excluded from the active
+            # layer are never evaluated, so their matrix_world is stale; these objects have no parents
+            zs = [(o.matrix_basis @ Vector(c)).z for c in o.bound_box]
+            if o.name.startswith("backdrop"):
+                backdrops.append([o.name, max(zs)])
+            else:
+                lows.append(min(zs))
+        out[layer.name] = {"backdrops": backdrops, "lowest": min(lows)}
+    print("INSPECT " + json.dumps(out))
+""")
+
+
+def test_backdrop_sits_under_each_state(tmp_path, monkeypatch):
+    """A screw driven from below: its exploded pull and its driver go down, so each state needs its own floor."""
+    monkeypatch.setenv("PRINT3D_CONFIG", str(tmp_path / "no-config.toml"))
+    project = tmp_path / "under"
+    project.mkdir()
+    (project / "assembly.py").write_text(UNDER_UNIT, encoding="utf-8")
+    (group,), _ = sm.load_groups(project / "assembly.py", (), "all", None, None, None)
+    staged_json = sm.write_staging(group, tmp_path / "stage")
+    blend = tmp_path / "under.blend"
+    proc = run_blender(staged_json, "--resolution", "64x48", "--samples", "1", "--blend", blend,
+                       "--still", f"assembled:iso:studio={tmp_path / 'a.png'}")
+    assert result_of(proc)["ok"], proc.stdout[-3000:]
+    script = tmp_path / "inspect.py"
+    script.write_text(BACKDROP_INSPECT, encoding="utf-8")
+    proc = subprocess.run([str(BLENDER), "--background", "--factory-startup", str(blend), "--python", str(script)],
+                          capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=TIMEOUT_S)
+    line = next(ln for ln in proc.stdout.splitlines() if ln.startswith("INSPECT "))
+    info = json.loads(line[len("INSPECT "):])
+    assert set(info) == {"assembled", "exploded", "tools"}
+    for state, layer in info.items():
+        (backdrop,) = layer["backdrops"]  # exactly one visible backdrop per state
+        assert backdrop[1] <= layer["lowest"] + 1e-6, (state, layer)
+    assert info["exploded"]["lowest"] < info["assembled"]["lowest"]  # the screw really is pulled down
+    assert info["tools"]["lowest"] < info["assembled"]["lowest"]  # and its driver points down

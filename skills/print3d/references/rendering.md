@@ -64,6 +64,8 @@ glow=15.0                                                  # emissive only: emis
 - Backdrop: `Unit(..., render=Render(backdrop="wall", facing=(0, -1, 0)))` (also on `Layout`; `RENDER` has the same two
   keys for a model). The default is `"floor"`. `facing` is the side of the object that faces away from the wall and is
   required for `"wall"`; it also becomes the group's up axis for the exploded view and the camera views.
+  Each state gets its own backdrop, at the lowest point of what that state shows (along up for a floor, along
+  `facing` for a wall). So a screw pulled down in the exploded view, or a driver pointing down, stays above the floor.
 
 A glowing strip behind a diffuser, with some instances recoloured:
 ```python
@@ -129,7 +131,8 @@ Give the user the `groups[].blend` path from `render.result.json` (one `.blend` 
 - View layers are the states: `assembled`, `exploded`, `tools`. Switch layer to switch state.
 - Cameras are `cam-<view>`: `cam-iso`, `cam-front`, `cam-right`, `cam-top`, `cam-tools`. Pick one as the scene camera or
   orbit freely.
-- Collections: `assembled`, `exploded` (only when something moves), `tools`, `backdrop`, `cameras`, and
+- Collections: `assembled`, `exploded` (only when something moves), `tools`, `backdrop-assembled`,
+  `backdrop-exploded`, `backdrop-tools` (each view layer shows only its own state's backdrop), `cameras`, and
   `lights-<lighting>`. The scene is in metres.
 
 ## Agent workflow

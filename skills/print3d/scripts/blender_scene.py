@@ -10,7 +10,8 @@ conversion, argument parsing), testable in the venv. The second part builds the 
 
 The last stdout line is `PRINT3D_RESULT <json>`. The .blend's layout (what the user opens and orbits):
 - collections `assembled` (one object per scene object, mesh data shared per mesh id), `exploded` (linked
-  duplicates moved by `explode`, only when some offset is non-zero), `tools`, `backdrop` and `cameras`;
+  duplicates moved by `explode`, only when some offset is non-zero), `tools`, `backdrop-assembled`,
+  `backdrop-exploded` and `backdrop-tools` (each state's floor or wall, at that state's bbox) and `cameras`;
 - scenes `studio`, `hard` and `dim`, one per lighting, each linking those collections plus its own
   `lights-<lighting>` collection and World;
 - view layers `assembled`, `exploded` and `tools` in every scene, one per state: switch layers to switch state;
@@ -150,11 +151,12 @@ SUN_STRENGTH = 4.0
 SUN_ANGLE_DEG = 0.5
 WORLD_STRENGTH = {"studio": 0.5, "hard": 0.05, "dim": 0.02}
 GPU_BACKENDS = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
-OBJECT_COLLECTIONS = ("assembled", "exploded", "tools", "backdrop", "cameras")
+BACKDROPS = tuple(f"backdrop-{state}" for state in STATES)  # one backdrop per state, under that state's bbox
+OBJECT_COLLECTIONS = ("assembled", "exploded", "tools", *BACKDROPS, "cameras")
 LAYER_SHOWS = {  # view layer (state) -> the object collections it shows; cameras show everywhere
-    "assembled": ("assembled", "backdrop"),
-    "exploded": ("exploded", "backdrop"),
-    "tools": ("assembled", "tools", "backdrop"),
+    "assembled": ("assembled", "backdrop-assembled"),
+    "exploded": ("exploded", "backdrop-exploded"),
+    "tools": ("assembled", "tools", "backdrop-tools"),
 }
 
 
@@ -270,16 +272,16 @@ def _build_objects(scene, meshes, colls):
     return out
 
 
-def _backdrop(scene, box, coll):
-    """A matte plane: a floor under the assembled bbox, or a wall behind it with its normal along `facing`."""
+def _backdrop(name, scene, box, coll, mat):
+    """A matte plane: a floor under `box` (one state's bbox), or a wall behind it with its normal along `facing`."""
     import bpy
     from mathutils import Vector
     centre, r = _centre_radius(box)
     half = BACKDROP_SCALE * r / 2
-    mesh = bpy.data.meshes.new("backdrop")
+    mesh = bpy.data.meshes.new(name)
     mesh.from_pydata([(-half, -half, 0), (half, -half, 0), (half, half, 0), (-half, half, 0)], [], [(0, 1, 2, 3)])
-    mesh.materials.append(_material(("matte", BACKDROP_RGB, None)))
-    obj = bpy.data.objects.new("backdrop", mesh)
+    mesh.materials.append(mat)
+    obj = bpy.data.objects.new(name, mesh)
     if scene["backdrop"] == "wall":
         normal = Vector(scene["facing"]).normalized()
         corners = [Vector((x, y, z)) for x in (box[0].x, box[1].x) for y in (box[0].y, box[1].y)
@@ -433,9 +435,9 @@ def _view_layers(sc, colls):
 def build(scene, folder, quality, resolution, samples):
     """Build the .blend's content from a scene.json dict.
 
-    Collections assembled, exploded (only when an offset is non-zero), tools, backdrop and cameras are linked
-    into the scenes studio, hard and dim; each scene adds its own lights-<lighting> collection and World, and has
-    the view layers assembled, exploded and tools. Cameras cam-<view> are framed on the assembled state (cam-tools
+    Collections assembled, exploded (only when an offset is non-zero), tools, backdrop-<state> (one floor or wall
+    per state, at that state's bbox) and cameras are linked into the scenes studio, hard and dim; each scene adds
+    its own lights-<lighting> collection and World, and has the view layers assembled, exploded and tools. Cameras cam-<view> are framed on the assembled state (cam-tools
     on the tools state). Returns (engine, device, bbox per state, cameras, aspect).
     """
     import bpy
@@ -448,7 +450,9 @@ def build(scene, folder, quality, resolution, samples):
         "exploded": _bbox_of(objs["exploded"]) or assembled,
         "tools": _union(assembled, _bbox_of(objs["tools"])),
     }
-    _backdrop(scene, assembled, colls["backdrop"])
+    backdrop_mat = _material(("matte", BACKDROP_RGB, None))
+    for state in STATES:  # each state's own floor or wall, so nothing it shows sits below or behind it
+        _backdrop(f"backdrop-{state}", scene, boxes[state], colls[f"backdrop-{state}"], backdrop_mat)
     cams = _cameras(colls["cameras"])
     aspect = resolution[0] / resolution[1]
     for view, cam in cams.items():
