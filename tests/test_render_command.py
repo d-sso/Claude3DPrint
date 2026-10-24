@@ -118,6 +118,21 @@ def test_blender_missing(capsys, tmp_path, monkeypatch):
     assert (tmp_path / "render.result.json").is_file()
 
 
+@pytest.mark.parametrize("args, message", [
+    (("missing.py",), "File not found"),
+    (("README.txt",), "Expected a .py file"),
+    ((BOXLID / "assembly.py", "--unit", "nope"), "Unknown unit 'nope'"),
+    ((BOXLID / "assembly.py", "--unit", "box", "--level", "layout"), "--unit cannot be combined"),
+])
+def test_usage_errors_come_before_the_blender_lookup(capsys, tmp_path, monkeypatch, args, message):
+    monkeypatch.setattr(render_scene, "find_blender", lambda config: None)
+    (tmp_path / "README.txt").write_text("not a model", encoding="utf-8")
+    args = [tmp_path / a if a in ("missing.py", "README.txt") else a for a in args]
+    code, data = render(capsys, *args, "--out", tmp_path)
+    assert code == 2 and data["error"]["stage"] == "usage", data["error"]
+    assert message in data["error"]["message"]
+
+
 def test_blender_failure_reports_log_and_leaves_no_stale_images(capsys, tmp_path, fake_blender, monkeypatch):
     code, data = render(capsys, BOXLID / "assembly.py", "--out", tmp_path)
     assert code == 0, data["error"]

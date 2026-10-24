@@ -247,13 +247,6 @@ def render(path, set_pairs=(), level="all", unit=None, layout=None, quality="dra
         views, lightings, states = _unique(views), _unique(lightings), _unique(states)
         profile = run_model.activate_profile(profile)
 
-        stage = "blender"
-        if blender is None:
-            blender = find_blender(config or {})
-        if blender is None:
-            raise RunError("blender", MISSING_MESSAGE)
-        result["blender"]["path"] = Path(blender).resolve().as_posix()
-
         stage = "load"
         start = time.perf_counter()
         try:
@@ -266,7 +259,12 @@ def render(path, set_pairs=(), level="all", unit=None, layout=None, quality="dra
             result[key] = meta[key]
         result["warnings"] += meta["warnings"]
 
-        stage = "blender"
+        stage = "blender"  # after the load: a bad file or selection is a usage or load error, Blender or not
+        if blender is None:
+            blender = find_blender(config or {})
+        if blender is None:
+            raise RunError("blender", MISSING_MESSAGE)
+        result["blender"]["path"] = Path(blender).resolve().as_posix()
         root = out / "render"
         for group in groups:  # all first: a failing group must not leave a later group's old render behind
             clear_group(root / group.folder)
