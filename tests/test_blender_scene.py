@@ -28,7 +28,8 @@ if BLENDER is None:
 
 def run_blender(*args, python=SCRIPT):
     proc = subprocess.run([str(BLENDER), "--background", "--factory-startup", "--python", str(python), "--",
-                           *map(str, args)], capture_output=True, text=True, timeout=TIMEOUT_S)
+                           *map(str, args)], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          timeout=TIMEOUT_S)
     return proc
 
 
@@ -90,7 +91,8 @@ def test_blend_structure(staged, default_run, tmp_path):
     script = tmp_path / "inspect.py"
     script.write_text(INSPECT, encoding="utf-8")
     proc = subprocess.run([str(BLENDER), "--background", "--factory-startup", res["blend"], "--python", str(script)],
-                          capture_output=True, text=True, timeout=TIMEOUT_S)
+                          capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          timeout=TIMEOUT_S)
     line = next(ln for ln in proc.stdout.splitlines() if ln.startswith("INSPECT "))
     info = json.loads(line[len("INSPECT "):])
     assert set(info["scenes"]) == {"studio", "hard", "dim"}

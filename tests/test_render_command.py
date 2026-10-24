@@ -274,4 +274,5 @@ def test_render_boxlid_real_blender(capsys, tmp_path):
     (group,) = data["groups"]
     assert len(group["images"]) == 9 and all(Path(i["path"]).stat().st_size > 0 for i in group["images"])
     assert Path(group["blend"]).is_file()
-    assert data["blender"]["version"].startswith("4.")
+    major, minor = map(int, data["blender"]["version"].split(".")[:2])
+    assert (major, minor) >= render_scene.MIN_BLENDER, data["blender"]["version"]
