@@ -71,6 +71,12 @@ items = [
 - `Nut(..., angle=30)` turns the hex about its own axis (degrees, right-handed about `direction`) so it lines up with its pocket. At `angle=0` one corner points along the nut frame's local +X: +X for `direction` +Z, -X for -Z, +Z for +X and +Y, -Z for -X and -Y (build123d's `Plane(origin, z_dir=direction)`). `repeat` turns the angle with each copy.
 - A `StandIn` is a straight build123d shape made in `assembly.py`. Ask the user for its real size.
 - `color` is `(r, g, b)` or `"#rrggbb"`; hardware defaults to grey.
+- Render-only fields (`print3d render`, see `rendering.md`; `assemble` only validates them), all optional:
+  - `material="matte" | "metal" | "translucent" | "emissive"` and `glow=` (emissive strength) on `Part`, `StandIn`, `Screw`, `Nut`, `Washer`.
+  - `explode=(dx, dy, dz)` mm on the same five: the item's offset in the exploded view (overrides the default rule).
+  - `Screw(..., tool=False)`: no driver stand-in on that screw.
+  - `Unit(..., render=Render(backdrop="wall", facing=(0, -1, 0)))`, also on `Layout`: a wall backdrop instead of the floor.
+  - `Layout(..., looks={"c1": {"strip": {"color": "#ff0000", "material": "emissive", "glow": 15}}})`: per-instance look of an item; it changes no geometry.
 
 ### Interfaces
 Every interface takes `source=` (keyword) and an optional `limit=` (mm), but only `Bolted` (axis offset, nut axis offset), `NutPocket` (axis offset) and `Seat` (gap) use it, with default 0.1. `Snap`, `Passage` and `Clear` accept it and ignore it.

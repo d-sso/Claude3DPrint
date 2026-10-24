@@ -21,7 +21,7 @@ powershell -ExecutionPolicy Bypass -File skills\print3d\scripts\setup.ps1
 2. creates a virtual environment at `%LOCALAPPDATA%\print3d\venv` and installs the pinned `requirements.txt`
    (about 750 MB, mostly the OpenCascade kernel);
 3. asks for your **parts library** folder (default `~/3DParts`) and saves it in `%LOCALAPPDATA%\print3d\config.toml`;
-4. looks for Blender (the `PRINT3D_BLENDER` variable, then `C:\Program Files\Blender Foundation\Blender *`) and records
+4. looks for Blender (the `blender` key in `config.toml`, then the `PRINT3D_BLENDER` variable, then `C:\Program Files\Blender Foundation\Blender *`) and records
    it as `blender` in `config.toml`; if there is none, it warns and carries on (only `print3d render` needs it);
 5. links `~/.claude/skills/print3d` to `skills/print3d` in this repo (a directory junction; no admin needed);
 6. builds a throwaway test part to check everything works.

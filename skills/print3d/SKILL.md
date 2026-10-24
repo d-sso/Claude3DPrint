@@ -22,7 +22,8 @@ Commands:
 - `print3d calibrate [--set gauges=...] [--profile NAME]`: builds the calibration coupon for the active printer profile and prints measuring instructions. `--set gauges=3.175,3.969,5.159` sets the measured gauge (drill-bit shank) diameters.
 - `print3d profile show|set KEY=VALUE ...|reset [KEY ...] [--profile NAME]`: shows the active profile, or records/removes calibrated values. Never hand-edit `config.toml`.
 - `print3d assemble <assembly.py> [--set key=value ...] [--level unit|layout|all] [--unit NAME] [--layout NAME] [--strict] [--out DIR] [--no-sheets] [--profile NAME]`: checks how parts fit together (section 7).
-- `--profile NAME` on `run`/`check`/`calibrate`/`assemble`/`profile` uses another printer profile for that command. A new material or nozzle needs its own profile file and its own calibration.
+- `print3d render <assembly.py|model.py> [--set key=value ...] [--level unit|layout|all] [--unit NAME] [--layout NAME] [--draft|--final] [--view V] [--lighting L] [--state S] [--resolution WxH] [--out DIR] [--profile NAME] [--open]`: renders stills and a `scene.blend` with Blender (section 8).
+- `--profile NAME` on `run`/`check`/`calibrate`/`assemble`/`render`/`profile` uses another printer profile for that command. A new material or nozzle needs its own profile file and its own calibration.
 
 ## 1. Gather requirements
 Before modelling, make sure you know the following. Ask **one question at a time**, and only for what isn't already clear:
@@ -115,3 +116,10 @@ Use this for projects whose parts mate with each other or with hardware. Read `r
 5. Record confirmed document conflicts in `Assembly(notes=[...])` so they appear in `warnings`.
 6. Run `print3d assemble`, and review every evidence sheet before hand-off, describing what it shows.
 7. A project may mark its root with `assembly.py` before it declares units: `Assembly(units=[])` passes with a warning. `--unit`/`--layout` runs keep the other groups' sheets. `run`/`check` warn when a shared name does not come from `shared()`.
+
+## 8. Render
+Optional, needs Blender 4.2+ (`setup.ps1` finds it). Read `references/rendering.md` first: declaring looks, the exploded view, tool access, reading the images.
+1. After `run` (a part) or `assemble` (an assembly) passes, run `print3d render <file>` (draft).
+2. Read **every** PNG and describe the look, the exploded stack and each blocked tool (what it hits). A draft `dim` image only approximates light through translucent parts.
+3. A blocked tool is a finding: raise it with the user, never move a screw quietly.
+4. Give the user the `.blend` path(s) and how to open them (`--open`); offer `--final` for the views they want.
