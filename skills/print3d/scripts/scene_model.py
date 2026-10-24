@@ -132,10 +132,16 @@ def explode_step(bbox, up=UP):
     return max(0.5 * size, EXPLODE_GAP)
 
 
+def _bottom(box, up):
+    """The least value of `up` . p over the box's corners: its bottom along up."""
+    return sum(min(lo * u, hi * u) for lo, hi, u in zip(box.min, box.max, up))
+
+
 def default_explode(items, up, step) -> dict:
     """{name: offset (mm)} for every item: the declared `explode`, else the default rule.
 
-    Parts and stand-ins rank by their bbox centre along `up` (ties by name); rank r moves r * step along up.
+    Parts and stand-ins rank by their bbox minimum along `up` (ties by bbox centre, then by name), so contents
+    resting inside a container rank above it and lift out of it; rank r moves r * step along up.
     Hardware takes the offset of the nearest non-hardware item (its origin to that item's bbox), plus its own
     pull along its axis: a screw +(length + EXPLODE_GAP), a washer +EXPLODE_GAP / 2, a nut -EXPLODE_GAP.
     """
@@ -143,7 +149,7 @@ def default_explode(items, up, step) -> dict:
     declared = {n: tuple(i.decl.explode) for n, i in items.items() if getattr(i.decl, "explode", None) is not None}
     bodies = {n: i for n, i in items.items() if i.kind not in HARDWARE_KINDS}
     boxes = {n: i.shape.bounding_box() for n, i in bodies.items()}
-    ranked = sorted(bodies, key=lambda n: (round(_dot(boxes[n].center(), up), 6), n))
+    ranked = sorted(bodies, key=lambda n: (round(_bottom(boxes[n], up), 6), round(_dot(boxes[n].center(), up), 6), n))
     rank_of, offsets = {n: r for r, n in enumerate(ranked)}, {}
     for rank, name in enumerate(ranked):
         offsets[name] = declared.get(name, tuple(rank * step * v for v in up))

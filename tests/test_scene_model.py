@@ -102,8 +102,8 @@ def test_unit_group_looks_and_defaults(box_group):
 
 def test_unit_group_explodes_lid_above_base(box_group):
     step = sm.explode_step(box_group.bbox)
-    assert obj(box_group, "battery").explode == (0.0, 0.0, 0.0)  # by centre height: battery, base, lid
-    assert approx3(obj(box_group, "base").explode, (0, 0, step))
+    assert obj(box_group, "base").explode == (0.0, 0.0, 0.0)  # by bbox bottom: base, battery (on pads), lid
+    assert approx3(obj(box_group, "battery").explode, (0, 0, step))
     assert approx3(obj(box_group, "lid").explode, (0, 0, 2 * step))
 
 
@@ -124,8 +124,25 @@ def test_default_explode_stacks_upwards():
 
 
 def test_default_explode_along_facing():
-    offsets = sm.default_explode(_stack(), (1, 0, 0), 7.0)  # all centres tie along x: ranked by name
+    offsets = sm.default_explode(_stack(), (1, 0, 0), 7.0)  # bottoms and centres tie along x: by name
     assert approx3(offsets["a"], (0, 0, 0)) and approx3(offsets["b"], (7, 0, 0)) and approx3(offsets["c"], (14, 0, 0))
+
+
+def test_default_explode_contents_rise_out_of_their_container():
+    # a 4 mm block resting 2 mm up inside a 20 mm tall box: its bottom is higher, though its centre is lower
+    items = _place(pa.StandIn("box", Box(30, 30, 20), at=Location((0, 0, 10))),
+                   pa.StandIn("block", Box(10, 10, 4), at=Location((0, 0, 4))))
+    offsets = sm.default_explode(items, (0, 0, 1), 7.0)
+    assert approx3(offsets["box"], (0, 0, 0)) and approx3(offsets["block"], (0, 0, 7))
+
+
+def test_default_explode_ties_on_bottom_by_centre_then_name():
+    items = _place(pa.StandIn("a-tall", Box(10, 10, 20), at=Location((0, 0, 10))),
+                   pa.StandIn("b-short", Box(10, 10, 4), at=Location((20, 0, 2))),
+                   pa.StandIn("c-short", Box(10, 10, 4), at=Location((40, 0, 2))))
+    offsets = sm.default_explode(items, (0, 0, 1), 7.0)
+    assert approx3(offsets["b-short"], (0, 0, 0)) and approx3(offsets["c-short"], (0, 0, 7))
+    assert approx3(offsets["a-tall"], (0, 0, 14))
 
 
 def test_declared_explode_wins():

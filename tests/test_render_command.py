@@ -133,6 +133,23 @@ def test_blender_failure_reports_log_and_leaves_no_stale_images(capsys, tmp_path
     assert (folder / "_staging" / "scene.json").is_file()  # kept for debugging
 
 
+def test_failure_on_first_group_leaves_no_stale_outputs_in_later_groups(capsys, tmp_path, fake_blender,
+                                                                       monkeypatch):
+    code, data = render(capsys, ROW / "assembly.py", "--out", tmp_path)
+    assert code == 0, data["error"]
+    folders = [tmp_path / "render" / g["folder"] for g in data["groups"]]
+    assert [f.name for f in folders] == ["unit-cell", "layout-row"]
+    for folder in folders:
+        assert list(folder.glob("*.png")) and (folder / "scene.blend").is_file()
+    monkeypatch.setenv("FAKE_BLENDER_FAIL", "exit")
+    code, data = render(capsys, ROW / "assembly.py", "--out", tmp_path)
+    assert code == 1 and data["error"]["stage"] == "blender" and "unit-cell" in data["error"]["message"]
+    assert len(list(folders[0].glob("*.png"))) <= 1  # the one the failing run wrote
+    for folder in folders:
+        assert not (folder / "scene.blend").exists(), folder.name
+    assert not list(folders[1].glob("*.png"))  # never rendered this run, and nothing left from the first
+
+
 def test_blender_without_result_line_fails(capsys, tmp_path, fake_blender, monkeypatch):
     monkeypatch.setenv("FAKE_BLENDER_FAIL", "noresult")
     code, data = render(capsys, BOXLID / "assembly.py", "--out", tmp_path)

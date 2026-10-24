@@ -162,7 +162,7 @@ def render_group(group, root, blender, plan, quality, resolution, samples, timin
     if not any(o.collection == "tools" for o in group.objects):
         entry["warnings"].append(f"{group.folder}: no screws, so no tools view")
     folder.mkdir(parents=True, exist_ok=True)
-    clear_group(folder)
+    clear_group(folder)  # render() has cleared every selected group already; this keeps render_group self-contained
     if not plan:
         entry["warnings"].append(f"{group.folder}: none of the requested stills apply (no tools or exploded state)")
         return entry, None
@@ -206,9 +206,9 @@ def render(path, set_pairs=(), level="all", unit=None, layout=None, quality="dra
            states=(), resolution=None, out_dir=None, profile=None, open_gui=False, blender=None, config=None):
     """Render every selected group with Blender. Returns (result, exit code).
 
-    Each group's previous PNGs and scene.blend are removed first (also when the run then fails), so none sits next
-    to a newer result. Its staging folder (<folder>/_staging) is removed after a successful render and kept after a
-    failed one, for debugging. blender: the executable (None: find_blender(config), config being the loaded
+    Every selected group's previous PNGs and scene.blend are removed before any group renders (also when the run
+    then fails), so none sits next to a newer result. A group's staging folder (<folder>/_staging) is removed after
+    a successful render and kept after a failed one, for debugging. blender: the executable (None: find_blender(config), config being the loaded
     config.toml). open_gui: launch Blender on the first .blend after a successful run.
     """
     path = Path(path).resolve()
@@ -259,6 +259,8 @@ def render(path, set_pairs=(), level="all", unit=None, layout=None, quality="dra
 
         stage = "blender"
         root = out / "render"
+        for group in groups:  # all first: a failing group must not leave a later group's old render behind
+            clear_group(root / group.folder)
         for group in groups:
             has_tools = any(o.collection == "tools" for o in group.objects)
             has_explode = any(any(o.explode) for o in group.objects if o.collection != "tools")
