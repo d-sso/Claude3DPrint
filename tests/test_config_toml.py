@@ -2,7 +2,7 @@ import tomllib
 
 import pytest
 
-from config_toml import write_profile_overrides
+from config_toml import set_top_level_key, write_profile_overrides
 
 ORIGINAL = (
     "# my config\r\n"
@@ -150,3 +150,28 @@ def test_semantic_check_refuses_unreadable_quoted_subtable(tmp_path):
     with pytest.raises(ValueError, match="could not safely edit"):
         write_profile_overrides(cfg, "p", {})
     assert cfg.read_text(encoding="utf-8") == text
+
+
+def test_set_top_level_key_adds_and_replaces(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_bytes(ORIGINAL.encode())
+    set_top_level_key(path, "blender", "C:/Blender/blender.exe")
+    added = path.read_bytes().decode()
+    lines = ORIGINAL.splitlines(keepends=True)
+    after_profile = next(i for i, line in enumerate(lines) if line.startswith("profile =")) + 1
+    expected = lines[:after_profile] + ['blender = "C:/Blender/blender.exe"\r\n'] + lines[after_profile:]
+    assert added.splitlines(keepends=True) == expected
+    assert tomllib.loads(added)["blender"] == "C:/Blender/blender.exe"
+
+    set_top_level_key(path, "blender", "D:/other/blender.exe")
+    replaced = path.read_bytes().decode()
+    assert replaced == added.replace("C:/Blender/blender.exe", "D:/other/blender.exe")
+
+
+def test_set_top_level_key_without_tables_and_missing_file(tmp_path):
+    path = tmp_path / "sub" / "config.toml"
+    set_top_level_key(path, "blender", "C:/b.exe")
+    assert path.read_text() == 'blender = "C:/b.exe"\n'
+    path.write_bytes(b'parts_dir = "x"')  # no trailing newline
+    set_top_level_key(path, "blender", "C:/b.exe")
+    assert path.read_bytes() == b'parts_dir = "x"\nblender = "C:/b.exe"\n'

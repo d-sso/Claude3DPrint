@@ -4,6 +4,10 @@
 # Folder where `print3d new` creates parts (one subfolder per part). Use forward slashes.
 parts_dir = "~/3DParts"
 
+# Blender, used by `print3d render`. setup.ps1 records it when it finds one; uncomment to set it by hand
+# (otherwise the PRINT3D_BLENDER environment variable, then C:\Program Files\Blender Foundation\Blender *, are tried).
+# blender = "C:/Program Files/Blender Foundation/Blender 4.5/blender.exe"
+
 # Active printer profile (a file in skills/print3d/profiles/). Override per command with --profile NAME.
 profile = "centauri-carbon-pla-plus"
 

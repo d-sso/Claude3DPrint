@@ -158,3 +158,18 @@ def test_assemblies_reference_examples_match_api():
 
 def test_readme_mentions_assemblies():
     assert "print3d assemble" in read(REPO / "README.md")
+
+
+def test_example_config_mentions_blender():
+    text = read(SKILL / "config.example.toml")
+    assert '# blender = "C:/Program Files/Blender Foundation/Blender 4.5/blender.exe"' in text
+
+
+def test_setup_ps1_has_blender_step():
+    text = read(SKILL / "scripts" / "setup.ps1")
+    assert "find_blender" in text and "set_top_level_key" in text
+
+
+def test_readme_documents_blender():
+    text = read(REPO / "README.md")
+    assert "Blender" in text and "print3d render" in text
