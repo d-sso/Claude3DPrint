@@ -124,8 +124,8 @@ def test_default_explode_stacks_upwards():
 
 
 def test_default_explode_along_facing():
-    offsets = sm.default_explode(_stack(), (1, 0, 0), 7.0)  # bottoms and centres tie along x: by name
-    assert approx3(offsets["a"], (0, 0, 0)) and approx3(offsets["b"], (7, 0, 0)) and approx3(offsets["c"], (14, 0, 0))
+    offsets = sm.default_explode(_stack(), (1, 0, 0), 7.0)  # all three boxes start at the same x: one level
+    assert all(approx3(offsets[n], (0, 0, 0)) for n in "abc")
 
 
 def test_default_explode_contents_rise_out_of_their_container():
@@ -136,13 +136,25 @@ def test_default_explode_contents_rise_out_of_their_container():
     assert approx3(offsets["box"], (0, 0, 0)) and approx3(offsets["block"], (0, 0, 7))
 
 
-def test_default_explode_ties_on_bottom_by_centre_then_name():
-    items = _place(pa.StandIn("a-tall", Box(10, 10, 20), at=Location((0, 0, 10))),
-                   pa.StandIn("b-short", Box(10, 10, 4), at=Location((20, 0, 2))),
-                   pa.StandIn("c-short", Box(10, 10, 4), at=Location((40, 0, 2))))
+def test_default_explode_same_height_items_share_a_rank():
+    items = _place(pa.StandIn("a", Box(10, 10, 4), at=Location((0, 0, 2))),
+                   pa.StandIn("b", Box(10, 10, 4), at=Location((20, 0, 2))),
+                   pa.StandIn("c", Box(10, 10, 4), at=Location((40, 0, 2))),
+                   pa.StandIn("top", Box(50, 10, 4), at=Location((20, 0, 6))))
     offsets = sm.default_explode(items, (0, 0, 1), 7.0)
-    assert approx3(offsets["b-short"], (0, 0, 0)) and approx3(offsets["c-short"], (0, 0, 7))
-    assert approx3(offsets["a-tall"], (0, 0, 14))
+    for name in "abc":
+        assert approx3(offsets[name], (0, 0, 0))
+    assert approx3(offsets["top"], (0, 0, 7))
+
+
+def test_default_explode_levels_are_dense_and_tolerant():
+    items = _place(pa.StandIn("a", Box(10, 10, 4), at=Location((0, 0, 2))),
+                   pa.StandIn("b", Box(10, 10, 4), at=Location((20, 0, 2.005))),
+                   pa.StandIn("tall", Box(10, 10, 20), at=Location((40, 0, 10))),
+                   pa.StandIn("hi", Box(10, 10, 4), at=Location((60, 0, 30))))
+    offsets = sm.default_explode(items, (0, 0, 1), 7.0)
+    assert approx3(offsets["a"], (0, 0, 0)) and approx3(offsets["b"], (0, 0, 0))
+    assert approx3(offsets["tall"], (0, 0, 0)) and approx3(offsets["hi"], (0, 0, 7))
 
 
 def test_declared_explode_wins():

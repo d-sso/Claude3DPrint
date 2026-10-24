@@ -88,7 +88,8 @@ when some offset is non-zero.
 - `explode=(dx, dy, dz)` on `Part`, `StandIn`, `Screw`, `Nut`, `Washer` sets the offset; it wins over the rule below.
   `repeat` turns it with the copy's rotation, like `direction`.
 - Default rule. Up is +Z (the `facing` direction for a wall); `step` = half the group's size along up, at least 10 mm.
-  - Parts and stand-ins are ranked by the bottom of their bounding box along up, then by box centre, then by name.
+  - Parts and stand-ins are ranked by the bottom of their bounding box along up. Items resting at the same height
+    (bottoms within 0.01 mm) move together: they share one rank, and the distinct heights get ranks 0, 1, 2, ...
     Rank `r` moves `r * step` along up. So things resting inside a container rank above it and lift out of it.
   - Hardware moves like the nearest part (origin to bounding box), plus its own pull along its axis: a screw out
     along its direction by its length + 10 mm, a washer 5 mm, a nut 10 mm the opposite way.

@@ -17,6 +17,7 @@ from run_model import RunError
 
 RENDER_LINEAR_TOL = 0.05  # mm, render mesh tessellation (the print STLs keep run_model.LINEAR_TOL)
 RENDER_ANGULAR_TOL = 0.2  # rad
+EXPLODE_TIE = 0.01  # mm: bottoms along up within this share one resting height (one explode rank)
 EXPLODE_GAP = 10.0  # mm: the least step between exploded layers, and the hardware pull
 TOOL_RGB = (60, 60, 70)  # a driver that reaches its screw
 SCENE_VERSION = 1
@@ -140,8 +141,10 @@ def _bottom(box, up):
 def default_explode(items, up, step) -> dict:
     """{name: offset (mm)} for every item: the declared `explode`, else the default rule.
 
-    Parts and stand-ins rank by their bbox minimum along `up` (ties by bbox centre, then by name), so contents
-    resting inside a container rank above it and lift out of it; rank r moves r * step along up.
+    Parts and stand-ins rank by their bbox minimum along `up`, so contents resting inside a container rank
+    above it and lift out of it. Bottoms within EXPLODE_TIE share one level, and levels get dense ranks 0, 1, 2, ...
+    in ascending order, so items resting at the same height move together; rank r moves r * step along up.
+    (Bbox centre and name only fix a deterministic order, never an offset.)
     Hardware takes the offset of the nearest non-hardware item (its origin to that item's bbox), plus its own
     pull along its axis: a screw +(length + EXPLODE_GAP), a washer +EXPLODE_GAP / 2, a nut -EXPLODE_GAP.
     """
@@ -150,9 +153,19 @@ def default_explode(items, up, step) -> dict:
     bodies = {n: i for n, i in items.items() if i.kind not in HARDWARE_KINDS}
     boxes = {n: i.shape.bounding_box() for n, i in bodies.items()}
     ranked = sorted(bodies, key=lambda n: (round(_bottom(boxes[n], up), 6), round(_dot(boxes[n].center(), up), 6), n))
-    rank_of, offsets = {n: r for r, n in enumerate(ranked)}, {}
-    for rank, name in enumerate(ranked):
-        offsets[name] = declared.get(name, tuple(rank * step * v for v in up))
+    rank_of, offsets, level = {}, {}, None
+    for name in ranked:
+        bottom = _bottom(boxes[name], up)
+        if level is None:
+            rank_of[name] = 0
+        elif bottom - level > EXPLODE_TIE:
+            rank_of[name] = rank_of[last] + 1
+        else:
+            rank_of[name] = rank_of[last]
+        if level is None or bottom - level > EXPLODE_TIE:
+            level = bottom
+        last = name
+        offsets[name] = declared.get(name, tuple(rank_of[name] * step * v for v in up))
     for name, item in items.items():
         if item.kind not in HARDWARE_KINDS:
             continue
