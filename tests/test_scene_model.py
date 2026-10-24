@@ -327,3 +327,31 @@ def test_write_staging_schema(box_group, tmp_path):
     lid = next(o for o in data["objects"] if o["name"] == "lid")
     assert lid["rgb"] == [90, 140, 220] and lid["material"] == "matte" and lid["glow"] is None
     assert len(data["tool_access"]) == 2
+
+
+def _assembly(tmp_path, body):
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "assembly.py").write_text(body, encoding="utf-8")
+    return root / "assembly.py"
+
+
+def test_load_groups_warns_like_assemble(tmp_path):
+    path = _assembly(tmp_path, "from print3d_assembly import Assembly\n"
+                               "def build_assembly(a):\n    return Assembly([])\n")
+    groups, meta = sm.load_groups(path, (), "all", None, None, None)
+    assert groups == [] and "no units or layouts declared" in meta["warnings"]
+
+
+def test_load_groups_activates_profile_before_loading(tmp_path):
+    import print3d_profile
+
+    path = _assembly(tmp_path, "from build123d import Box\n"
+                               "from print3d_assembly import Assembly, StandIn, Unit\n"
+                               "from print3d_profile import profile_value\n"
+                               "BED = profile_value('printer.bed_x')\n"
+                               "def build_assembly(a):\n"
+                               "    return Assembly([Unit('u', [StandIn('s', Box(BED, 1, 1))])])\n")
+    profile = print3d_profile.load_profile(overrides={"printer.bed_x": "100"})
+    (g,), _ = sm.load_groups(path, (), "all", None, None, profile)
+    assert approx3((g.bbox[1][0] - g.bbox[0][0],), (100,))

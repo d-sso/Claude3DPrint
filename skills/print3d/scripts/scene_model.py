@@ -236,14 +236,18 @@ def unit_group(unit, unit_items) -> SceneGroup:
                       render, access, warnings)
 
 
-def layout_group(layout, unit_items, units, builder) -> SceneGroup:
+def layout_group(layout, unit_items, units, builder, *, placed=None) -> SceneGroup:
     """One layout's scene: every instance's items (unit meshes reused, variants their own), the layout items
-    exploded among themselves, and tools on the layout-level screws only (checked against everything placed)."""
+    exploded among themselves, and tools on the layout-level screws only (checked against everything placed).
+
+    placed: the layout's place_layout dict when the caller has it already (load_groups passes assemble's own).
+    """
     from assembly_sheets import item_colors
     from print3d_assembly import Screw
 
     render = layout.render or _default_render()
-    placed = assemble_model.place_layout(layout, unit_items, builder)
+    if placed is None:
+        placed = assemble_model.place_layout(layout, unit_items, builder)
     bbox = _bbox(i.shape for i in placed.values())
     up = up_of(render)
     meshes, objects = {}, []
@@ -343,26 +347,21 @@ def model_group(path, set_pairs=()) -> SceneGroup:
 
 
 def _assembly_groups(path, set_pairs, level, unit, layout, profile):
+    """assemble's own load and build stages (same warnings, same placements), then one group per selection."""
     check_units, check_layouts = assemble_model._levels(level, unit, layout)
-    result = {"warnings": []}
-    module, params, shared_overrides = assemble_model.load_assembly(path, set_pairs)
-    assembly = assemble_model.declare_assembly(module, params, shared_overrides)
-    raw = run_model.parse_overrides(set_pairs)
-    result["warnings"] += [note for note in assembly.notes if note not in result["warnings"]]
+    result = {"parameters": {}, "overrides": {}, "warnings": []}
+    assembly, shared_overrides = assemble_model._stage_load(path, set_pairs, result)
     units = {u.name: u for u in assembly.units}
     unit_list = assemble_model._select("unit", units, unit) if check_units else []
     layout_list = (assemble_model._select("layout", {lay.name: lay for lay in assembly.layouts}, layout)
                    if check_layouts else [])
     builder = assemble_model.Builder(Path(path).parent, shared_overrides, result)
-    needed = {u.name for u in unit_list} | {name for lay in layout_list for _, name, _ in lay.instances}
-    run_model.activate_profile(profile)
-    unit_items = {u.name: {decl.name: builder.item(decl) for decl in u.items}
-                  for u in assembly.units if u.name in needed}
+    unit_items, layout_items = assemble_model._stage_build(assembly, builder, unit_list, layout_list, profile)
     groups = [unit_group(u, unit_items[u.name]) for u in unit_list]
-    groups += [layout_group(lay, unit_items, units, builder) for lay in layout_list]
+    groups += [layout_group(lay, unit_items, units, builder, placed=layout_items[lay.name]) for lay in layout_list]
     meta = {
-        "parameters": dict(params),
-        "overrides": {**shared_overrides, **{k: params[k] for k in raw if k not in shared_overrides}},
+        "parameters": result["parameters"],
+        "overrides": result["overrides"],
         "shared": {**builder.interfaces, **shared_overrides},
         "warnings": result["warnings"],
     }
@@ -380,10 +379,10 @@ def load_groups(path, set_pairs=(), level="all", unit=None, layout=None, profile
         raise RunError("usage", f"File not found: {path.as_posix()}")
     if path.suffix.lower() != ".py":
         raise RunError("usage", f"Expected a .py file: {path.as_posix()}")
+    run_model.parse_overrides(set_pairs)
+    profile = run_model.activate_profile(profile)  # first, as assemble and run do: before any project code loads
     if path.name.lower() == "assembly.py":
         return _assembly_groups(path, set_pairs, level, unit, layout, profile)
-    run_model.parse_overrides(set_pairs)
-    run_model.activate_profile(profile)
     group, meta = _load_model_group(path, set_pairs)
     return [group], meta
 
