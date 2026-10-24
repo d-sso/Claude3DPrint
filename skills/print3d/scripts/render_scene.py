@@ -196,6 +196,15 @@ def render_group(group, root, blender, plan, quality, resolution, samples, timin
 # --- the command --------------------------------------------------------------------------------------------------
 
 
+def _detached():
+    """Popen kwargs for the --open GUI: no shared std handles (stdout carries one JSON document) and, on Windows,
+    no shared console or process group, so the agent's shell doesn't wait on Blender or take it down."""
+    kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    return kwargs
+
+
 def _exit_code(result):
     if result["ok"]:
         return 0
@@ -283,7 +292,7 @@ def render(path, set_pairs=(), level="all", unit=None, layout=None, quality="dra
     blends = [g["blend"] for g in result["groups"] if g["blend"]]
     if open_gui and result["ok"] and blends:
         try:
-            subprocess.Popen([str(blender), str(Path(blends[0]))])
+            subprocess.Popen([str(blender), str(Path(blends[0]))], **_detached())
         except OSError as exc:
             result["warnings"].append(f"Could not open Blender: {exc}")
 

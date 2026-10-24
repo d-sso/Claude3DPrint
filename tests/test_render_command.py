@@ -2,6 +2,7 @@
 import json
 import shutil
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -219,17 +220,22 @@ def test_render_passes_resolution_and_quality(capsys, tmp_path, fake_blender, mo
 
 def test_render_open_launches_blender_on_the_blend(capsys, tmp_path, fake_blender, monkeypatch):
     opened = []
-    real_popen = render_scene.subprocess.Popen
-
-    def popen(cmd, **kwargs):  # subprocess.run uses Popen too, always with keyword arguments
-        if kwargs:
-            return real_popen(cmd, **kwargs)
-        opened.append(cmd)
-
-    monkeypatch.setattr(render_scene.subprocess, "Popen", popen)
+    sp = render_scene.subprocess
+    # a stand-in for the subprocess module in render_scene only: its run() still uses the real Popen, and nothing
+    # else (modules imported during load) sees the spy
+    spy = types.SimpleNamespace(**vars(sp))
+    spy.Popen = lambda cmd, **kwargs: opened.append((cmd, kwargs))
+    monkeypatch.setattr(render_scene, "subprocess", spy)
     code, data = render(capsys, BOXLID / "assembly.py", "--out", tmp_path, "--view", "iso", "--open")
     assert code == 0, data["error"]
-    assert opened == [[str(FAKE), str(Path(data["groups"][0]["blend"]))]]
+    ((cmd, kwargs),) = opened
+    assert cmd == [str(FAKE), str(Path(data["groups"][0]["blend"]))]
+    # detached from the CLI's std handles (stdout carries exactly one JSON document) and from its process tree
+    assert kwargs["stdin"] == kwargs["stdout"] == kwargs["stderr"] == sp.DEVNULL
+    if render_scene.os.name == "nt":
+        assert kwargs["creationflags"] == sp.DETACHED_PROCESS | sp.CREATE_NEW_PROCESS_GROUP
+    else:
+        assert "creationflags" not in kwargs
 
 
 def test_render_does_not_touch_assembly_outputs(capsys, tmp_path, fake_blender):
