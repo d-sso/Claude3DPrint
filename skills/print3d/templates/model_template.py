@@ -32,3 +32,6 @@ def expected(p):
 
 # Lower a check threshold only for a deliberate feature, and say why, e.g.:
 # CHECKS = {"min_wall": 0.6}  # living hinge is meant to flex
+
+# Look for `print3d render` (optional, see references/rendering.md). Keys: color, material, glow, backdrop, facing.
+# RENDER = {"color": "#d9a066", "material": "matte"}

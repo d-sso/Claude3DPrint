@@ -8,6 +8,7 @@ A [Claude Code](https://claude.com/claude-code) skill for designing **3D-printab
 - Windows 10/11 with PowerShell 5.1 or later
 - Python 3.11, 3.12 or 3.13 ([python.org](https://www.python.org/downloads/))
 - Claude Code
+- Optional: [Blender](https://www.blender.org/) 4.2 or later, only for `print3d render` (`winget install BlenderFoundation.Blender`)
 
 ## Install
 ```powershell
@@ -20,10 +21,12 @@ powershell -ExecutionPolicy Bypass -File skills\print3d\scripts\setup.ps1
 2. creates a virtual environment at `%LOCALAPPDATA%\print3d\venv` and installs the pinned `requirements.txt`
    (about 750 MB, mostly the OpenCascade kernel);
 3. asks for your **parts library** folder (default `~/3DParts`) and saves it in `%LOCALAPPDATA%\print3d\config.toml`;
-4. links `~/.claude/skills/print3d` to `skills/print3d` in this repo (a directory junction; no admin needed);
-5. builds a throwaway test part to check everything works.
+4. looks for Blender (the `blender` key in `config.toml`, then the `PRINT3D_BLENDER` variable, then `C:\Program Files\Blender Foundation\Blender *`) and records
+   it as `blender` in `config.toml`; if there is none, it warns and carries on (only `print3d render` needs it);
+5. links `~/.claude/skills/print3d` to `skills/print3d` in this repo (a directory junction; no admin needed);
+6. builds a throwaway test part to check everything works.
 
-Parameters: `-PartsDir <folder>` skips the prompt; `-SkipSelfTest` skips step 5.
+Parameters: `-PartsDir <folder>` skips the prompt; `-SkipSelfTest` skips step 6.
 
 Re-run `setup.ps1` after pulling a change to `skills/print3d/requirements.txt`.
 
@@ -54,6 +57,10 @@ For projects of several mating parts, `print3d assemble <assembly.py>` checks th
 `interfaces.py`, bolted joints, snap engagement, seats, passages through neighbouring units, overlaps and
 design targets, with a coloured section sheet per check in `out/assembly/`. Claude derives the checks from your
 design document and confirms them with you first; see `skills/print3d/references/assemblies.md`.
+
+With Blender installed, `print3d render <model.py or assembly.py>` renders stills and a `scene.blend` to
+`out/render/` (fast EEVEE drafts by default, `--final` for slow Cycles stills; `--view`, `--lighting`, `--state` and
+`--resolution` narrow the set). Without Blender it exits with code 1 and says so.
 
 Exit codes: `0` ok, `1` model error, `2` usage error, `3` a check failed under `--strict`.
 

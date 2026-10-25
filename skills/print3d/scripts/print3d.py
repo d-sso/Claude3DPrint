@@ -8,6 +8,9 @@
     print3d profile show|set KEY=VALUE ...|reset [KEY ...] [--profile NAME]
     print3d assemble <assembly.py> [--set key=value ...] [--level unit|layout|all] [--unit NAME] [--layout NAME]
                 [--strict] [--out DIR] [--profile NAME] [--no-sheets]
+    print3d render <assembly.py | model.py> [--set key=value ...] [--level unit|layout|all] [--unit NAME]
+                [--layout NAME] [--draft | --final] [--view V ...] [--lighting L ...] [--state S ...]
+                [--resolution WxH] [--out DIR] [--profile NAME] [--open]
 """
 from __future__ import annotations
 
@@ -70,6 +73,7 @@ NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 import run_model  # noqa: E402
+import blender_scene  # noqa: E402  (standard library only at import time)
 import config_toml  # noqa: E402
 import print3d_profile  # noqa: E402
 
@@ -273,6 +277,28 @@ def build_parser():
     p_asm.add_argument("--out", type=Path, help="output folder (default: <assembly dir>/out)")
     p_asm.add_argument("--profile", help="printer profile name (default: config 'profile')")
     p_asm.add_argument("--no-sheets", dest="sheets", action="store_false", help="skip the evidence sheets")
+    p_ren = sub.add_parser("render", help="render a model, unit or layout with Blender: stills and a .blend")
+    p_ren.add_argument("model", type=Path, help="an assembly.py or a model .py")
+    p_ren.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE",
+                       help="a shared value, an assembly parameter or a model parameter")
+    p_ren.add_argument("--level", choices=("unit", "layout", "all"), default="all",
+                       help="render the unit types, the layouts, or both (default; assemblies only)")
+    p_ren.add_argument("--unit", help="render only this unit")
+    p_ren.add_argument("--layout", help="render only this layout")
+    quality = p_ren.add_mutually_exclusive_group()
+    quality.add_argument("--draft", dest="quality", action="store_const", const="draft",
+                         help="fast EEVEE stills (default)")
+    quality.add_argument("--final", dest="quality", action="store_const", const="final",
+                         help="slow, high-quality Cycles stills")
+    p_ren.set_defaults(quality="draft")
+    p_ren.add_argument("--view", dest="views", action="append", default=[], choices=blender_scene.VIEWS)
+    p_ren.add_argument("--lighting", dest="lightings", action="append", default=[], choices=blender_scene.LIGHTINGS)
+    p_ren.add_argument("--state", dest="states", action="append", default=[], choices=blender_scene.STATES)
+    p_ren.add_argument("--resolution", type=_resolution, metavar="WxH", help="image size, e.g. 1280x960")
+    p_ren.add_argument("--out", type=Path, help="output folder (default: <model dir>/out)")
+    p_ren.add_argument("--profile", help="printer profile name (default: config 'profile')")
+    p_ren.add_argument("--open", dest="open_gui", action="store_true",
+                       help="open the first .blend in Blender when done")
     p_prof = sub.add_parser("profile", help="show or edit the active printer profile's calibration overrides")
     prof_sub = p_prof.add_subparsers(dest="profile_command", required=True)
     p_show = prof_sub.add_parser("show", help="print the merged profile and where each value comes from")
@@ -283,6 +309,13 @@ def build_parser():
     for p in (p_show, p_set, p_reset):
         p.add_argument("--profile", help="printer profile name (default: config 'profile')")
     return parser
+
+
+def _resolution(text):
+    match = re.fullmatch(r"(\d+)x(\d+)", text)
+    if not match or int(match[1]) < 1 or int(match[2]) < 1:
+        raise argparse.ArgumentTypeError(f"expected WxH with positive sizes, e.g. 1280x960; got {text!r}")
+    return text
 
 
 def _add_check_options(parser):
@@ -333,6 +366,16 @@ def main(argv=None):
                 args.assembly, args.overrides, level=args.level, unit=args.unit, layout=args.layout,
                 out_dir=args.out, profile=resolve_profile(load_config(), args.profile), strict=args.strict,
                 sheets=args.sheets,
+            )
+        elif args.command == "render":
+            import render_scene
+
+            config = load_config()
+            result, code = render_scene.render(
+                args.model, args.overrides, level=args.level, unit=args.unit, layout=args.layout,
+                quality=args.quality, views=args.views, lightings=args.lightings, states=args.states,
+                resolution=args.resolution, out_dir=args.out, profile=resolve_profile(config, args.profile),
+                open_gui=args.open_gui, config=config,
             )
         else:
             result, code = cmd_profile(args)

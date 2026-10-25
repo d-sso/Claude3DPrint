@@ -6,12 +6,13 @@
     2. Checks the venv path is safe on Windows (long-path guard)
     3. Creates/updates the venv at %LOCALAPPDATA%\print3d\venv and installs requirements.txt
     4. Writes %LOCALAPPDATA%\print3d\config.toml (parts_dir) if missing and creates the parts folder
-    5. Links ~/.claude/skills/print3d to this skill folder (directory junction, no admin needed)
-    6. Self-test: creates, builds and deletes a throwaway part
+    5. Finds Blender (optional, for `print3d render`) and records it as `blender` in config.toml
+    6. Links ~/.claude/skills/print3d to this skill folder (directory junction, no admin needed)
+    7. Self-test: creates, builds and deletes a throwaway part
 .PARAMETER PartsDir
     Parts library folder (skips the prompt). Default: ~/3DParts
 .PARAMETER SkipSelfTest
-    Skip step 6.
+    Skip step 7.
 #>
 [CmdletBinding()]
 param(
@@ -88,7 +89,22 @@ if ($LASTEXITCODE -ne 0) { Fail "Could not read $ConfigPath" }
 New-Item -ItemType Directory -Force -Path "$resolved".Trim() | Out-Null
 Write-Host "    parts_dir = $("$resolved".Trim())"
 
-# 5. Skill link
+# 5. Blender (optional: only `print3d render` needs it)
+Step 'Looking for Blender (optional, for print3d render)'
+$blender = & $VenvPython -c "import sys; sys.path.insert(0, r'$ScriptsDir'); import print3d, render_scene; print(render_scene.find_blender(print3d.load_config()) or '')"
+if ($LASTEXITCODE -ne 0) { Fail 'Looking for Blender failed.' }
+$blender = "$blender".Trim() -replace '\\', '/'
+if ($blender) {
+    & $VenvPython -c "import sys; sys.path.insert(0, r'$ScriptsDir'); import config_toml; config_toml.set_top_level_key(sys.argv[1], 'blender', sys.argv[2])" $ConfigPath $blender
+    if ($LASTEXITCODE -ne 0) { Fail "Could not record Blender in $ConfigPath" }
+    Write-Host "    blender = $blender"
+}
+else {
+    Write-Host '    Blender 4.2 or later not found. print3d render will not work until it is installed.' -ForegroundColor Yellow
+    Write-Host '    Install it with: winget install BlenderFoundation.Blender   (then re-run setup.ps1)' -ForegroundColor Yellow
+}
+
+# 6. Skill link
 New-Item -ItemType Directory -Force -Path (Split-Path $SkillLink -Parent) | Out-Null
 if (Test-Path $SkillLink) {
     $item = Get-Item $SkillLink -Force
@@ -101,7 +117,7 @@ else {
     Step "Linked $SkillLink -> $SkillDir"
 }
 
-# 6. Self-test
+# 7. Self-test
 if (-not $SkipSelfTest) {
     Step 'Self-test'
     $testDir = Join-Path $AppDir 'selftest'

@@ -24,6 +24,9 @@ def build_assembly(a):
         # Screw("screw", "M3", "socket", a["screw_len"], origin=(0, 0, 10), direction=(0, 0, 1)),  # origin = head seat
         # Nut("nut", "M3", "hex", origin=(0, 0, 2), direction=(0, 0, 1)),  # origin = the nut's far face
         # StandIn("strip", Box(40, 10, 3), at=place(z=5)),  # needs: from build123d import Box
+        # Render-only options (see references/rendering.md), on Part/StandIn/Screw/Nut/Washer:
+        #   material="metal" | "translucent" | "emissive", glow=15.0 (emissive only), explode=(0, 0, 30),
+        #   and Screw(..., tool=False) to skip the driver. Example: StandIn("strip", Box(40, 10, 3), material="emissive")
     ]
     interfaces = [
         # Bolted("bolt", "screw", [("part", "clearance")], nut="nut", source=SRC),
@@ -35,4 +38,6 @@ def build_assembly(a):
     notes = [
         # "Document conflict: <A says 3 mm, B says 4 mm>; the checks use <A> (confirmed by the user <date>)",
     ]
+    # Render options: Unit("unit", ..., render=Render(backdrop="wall", facing=(0, -1, 0))) (import Render), and on a Layout
+    # looks={"c1": {"strip": {"color": "#ff0000"}}} for a per-instance look.
     return Assembly([Unit("unit", items, interfaces, targets)], layouts=[], notes=notes)

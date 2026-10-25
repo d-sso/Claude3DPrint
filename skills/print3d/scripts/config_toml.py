@@ -10,6 +10,7 @@ Comment lines between the block's own keys are machine-managed and are dropped o
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import tomllib
 from pathlib import Path
@@ -82,6 +83,63 @@ def _check_semantics(path, profile_name, original, text, values):
         raise fail
 
 
+def _write_atomic(path, text):
+    # Write to a temp file in the same folder, then swap it in atomically. An interruption leaves either
+    # the old file or the new one, never a truncated file.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def set_top_level_key(path, key, value):
+    """Set `key = "value"` among the top-level keys (above the first [table]), keeping all other bytes.
+
+    An existing top-level line for the key is replaced in place (a trailing comment on it is dropped);
+    otherwise the key is inserted after the last top-level key (above the first table header and the blank or
+    comment lines that lead into it), or appended when there is no table.
+    """
+    path = Path(path)
+    original = ""
+    if path.exists():
+        with open(path, encoding="utf-8", newline="") as handle:
+            original = handle.read()
+    lines = original.splitlines(keepends=True)
+    eol = "\r\n" if "\r\n" in original else "\n"
+    first_table = next((i for i, line in enumerate(lines) if line.lstrip().startswith("[")), len(lines))
+    new_line = f"{key} = {_format_value(value)}"
+    pattern = re.compile(r"^\s*" + re.escape(key) + r"\s*=")
+    index = next((i for i in range(first_table) if pattern.match(lines[i])), None)
+    if index is not None:
+        ending = lines[index][len(lines[index].rstrip("\r\n")):] or eol
+        lines[index] = new_line + ending
+    else:
+        if first_table == len(lines) and lines and not lines[-1].endswith(("\n", "\r")):
+            lines[-1] += eol
+        # Insert after the last top-level key: blank and comment lines just above the table belong to it.
+        at = first_table
+        while at > 0 and (not lines[at - 1].strip() or lines[at - 1].lstrip().startswith("#")):
+            at -= 1
+        lines.insert(at, new_line + eol)
+
+    text = "".join(lines)
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"Writing {path.as_posix()} would produce invalid TOML ({exc}); config not changed") from exc
+    if parsed.get(key) != value:
+        raise ValueError(f"Could not safely set {key} in {path.as_posix()}; config not changed")
+    _write_atomic(path, text)
+
+
 def write_profile_overrides(path, profile_name, values):
     """Replace (or create, or remove when `values` is empty) the [profile_overrides.<profile_name>] table."""
     path = Path(path)
@@ -126,17 +184,4 @@ def write_profile_overrides(path, profile_name, values):
 
     _check_semantics(path, profile_name, original, text, values)
 
-    # Write to a temp file in the same folder, then swap it in atomically. An interruption leaves either
-    # the old file or the new one, never a truncated file.
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            handle.write(text)
-        os.replace(tmp_name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except FileNotFoundError:
-            pass
-        raise
+    _write_atomic(path, text)

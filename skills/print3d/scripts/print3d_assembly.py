@@ -26,6 +26,10 @@ import hardware
 from assembly_geometry import TARGET_TOL
 
 ROLES = ("clearance", "thread", "insert")
+MATERIALS = ("matte", "metal", "translucent", "emissive")
+DEFAULT_GLOW = 10.0  # Blender emission strength of an emissive look without `glow`
+BACKDROPS = ("floor", "wall")
+LOOK_KEYS = ("color", "material", "glow")
 AXES = ("x", "y", "z")
 
 
@@ -148,6 +152,23 @@ def _choice(obj, fld, valid):
         raise ValueError(f"{_where(obj, fld)} is {value!r}; valid: {', '.join(map(str, valid))}")
 
 
+def _look(obj, *, partial=False):
+    """Validate `material` and `glow` (positive, emissive only), which every item shares.
+
+    partial: a Layout.looks entry, merged over the item's own look later, may give `glow` without `material`
+    (the merged look is checked when the scene is made).
+    """
+    if obj.material is not None:
+        _choice(obj, "material", MATERIALS)
+    obj.glow = _num_field(obj, "glow", optional=True, positive=True)
+    if obj.glow is not None and obj.material != "emissive" and not (partial and obj.material is None):
+        raise ValueError(f"{_where(obj, 'glow')} is only for material='emissive', got material {obj.material!r}")
+
+
+def _explode(obj):
+    obj.explode = _vec(obj, "explode", optional=True)
+
+
 def _names(obj, fld):
     value = getattr(obj, fld)
     if isinstance(value, str) or not isinstance(value, (tuple, list)) or not value:
@@ -177,6 +198,9 @@ class Part:
     at: Location = field(default_factory=Location)
     params: dict | None = None
     color: tuple | str | None = None
+    material: str | None = None
+    glow: float | None = None
+    explode: tuple | None = None
 
     def __post_init__(self):
         _name(self)
@@ -190,6 +214,8 @@ class Part:
             raise ValueError(f"{_where(self, 'params')}['_part'] must be the name of one of the model's parts")
         self.params = dict(params)
         self.color = _color(self)
+        _look(self)
+        _explode(self)
 
 
 @dataclass
@@ -203,6 +229,10 @@ class Screw:
     origin: tuple
     direction: tuple
     color: tuple | str | None = None
+    material: str | None = None
+    glow: float | None = None
+    explode: tuple | None = None
+    tool: bool = True
 
     def __post_init__(self):
         _name(self)
@@ -212,6 +242,10 @@ class Screw:
         self.origin = _vec(self, "origin")
         self.direction = _vec(self, "direction", unit=True)
         self.color = _color(self)
+        _look(self)
+        _explode(self)
+        if not isinstance(self.tool, bool):
+            raise ValueError(f"{_where(self, 'tool')} must be True or False, got {self.tool!r}")
 
 
 @dataclass
@@ -230,6 +264,9 @@ class Nut:
     direction: tuple
     color: tuple | str | None = None
     angle: float = 0.0
+    material: str | None = None
+    glow: float | None = None
+    explode: tuple | None = None
 
     def __post_init__(self):
         _name(self)
@@ -239,6 +276,8 @@ class Nut:
         self.direction = _vec(self, "direction", unit=True)
         self.color = _color(self)
         self.angle = _num_field(self, "angle")
+        _look(self)
+        _explode(self)
 
 
 @dataclass
@@ -250,6 +289,9 @@ class Washer:
     origin: tuple
     direction: tuple
     color: tuple | str | None = None
+    material: str | None = None
+    glow: float | None = None
+    explode: tuple | None = None
 
     def __post_init__(self):
         _name(self)
@@ -257,6 +299,8 @@ class Washer:
         self.origin = _vec(self, "origin")
         self.direction = _vec(self, "direction", unit=True)
         self.color = _color(self)
+        _look(self)
+        _explode(self)
 
 
 @dataclass
@@ -267,6 +311,9 @@ class StandIn:
     shape: Shape
     at: Location = field(default_factory=Location)
     color: tuple | str | None = None
+    material: str | None = None
+    glow: float | None = None
+    explode: tuple | None = None
 
     def __post_init__(self):
         _name(self)
@@ -274,6 +321,8 @@ class StandIn:
             raise ValueError(f"{_where(self, 'shape')} must be a build123d shape, e.g. Box(20, 10, 4); got {self.shape!r}")
         _location(self, "at")
         self.color = _color(self)
+        _look(self)
+        _explode(self)
 
 
 ITEM_TYPES = (Part, Screw, Nut, Washer, StandIn)
@@ -654,6 +703,37 @@ def _check_refs(owner, decls, lookup):
 
 
 @dataclass
+class Render:
+    """How a unit or layout is staged for `print3d render`: on the floor, or against a wall.
+
+    facing: for "wall", the vector (normalised) of the side of the object that faces away from the wall.
+    """
+
+    backdrop: str = "floor"
+    facing: tuple | None = None
+
+    def __post_init__(self):
+        _choice(self, "backdrop", BACKDROPS)
+        self.facing = _vec(self, "facing", unit=True, optional=True)
+        if self.backdrop == "wall" and self.facing is None:
+            raise ValueError(f"{_where(self, 'facing')} is required for backdrop 'wall': the side facing away from the wall")
+
+
+def _render(obj):
+    if obj.render is not None and not isinstance(obj.render, Render):
+        raise ValueError(f"{_where(obj, 'render')} must be a Render(...) or None, got {obj.render!r}")
+
+
+class _LookProbe:
+    """One look entry run through the item checks; `name` labels the errors. partial: see _look."""
+
+    def __init__(self, name, color=None, material=None, glow=None, *, partial=False):
+        self.name, self.color, self.material, self.glow = name, color, material, glow
+        self.color = _color(self)
+        _look(self, partial=partial)
+
+
+@dataclass
 class Unit:
     """A named group of placed items in its own frame, with its interfaces and targets."""
 
@@ -661,9 +741,11 @@ class Unit:
     items: list
     interfaces: list = ()
     targets: list = ()
+    render: Render | None = None
 
     def __post_init__(self):
         _name(self)
+        _render(self)
         self.items = _typed_list(self, "items", ITEM_TYPES, "items")
         if not self.items:
             raise ValueError(f"{_where(self, 'items')} must hold at least one item")
@@ -688,6 +770,7 @@ class Layout:
 
     instances: [(instance_name, unit_name, Location)]. exact: the instance names checked with full solids.
     overrides: {instance: {item: params}} for per-instance part variants. References use "<instance>.<item>".
+    looks: {instance: {item: {"color" | "material" | "glow": value}}}, per-instance appearance of any item type.
     """
 
     name: str
@@ -697,9 +780,12 @@ class Layout:
     targets: list = ()
     exact: tuple = ()
     overrides: dict | None = None
+    render: Render | None = None
+    looks: dict | None = None
 
     def __post_init__(self):
         _name(self)
+        _render(self)
         if isinstance(self.instances, str) or not isinstance(self.instances, (tuple, list)) or not self.instances:
             raise ValueError(f"{_where(self, 'instances')} must be a non-empty list of (instance, unit, Location)")
         rows = []
@@ -737,6 +823,25 @@ class Layout:
             if not isinstance(per_item, dict) or not all(isinstance(p, dict) for p in per_item.values()):
                 raise ValueError(f"{_where(self, 'overrides')}[{inst!r}] must be {{item: params dict}}")
         self.overrides = {inst: {item: dict(p) for item, p in per.items()} for inst, per in overrides.items()}
+        looks = {} if self.looks is None else self.looks
+        shape = f"{_where(self, 'looks')} must be {{instance: {{item: {{{'|'.join(LOOK_KEYS)}: value}}}}}}"
+        if not isinstance(looks, dict):
+            raise ValueError(f"{shape}, got {self.looks!r}")
+        checked = {}
+        for inst, per_item in looks.items():
+            if inst not in names:
+                raise ValueError(f"{_where(self, 'looks')}: unknown instance {inst!r}; instances: {', '.join(sorted(names))}")
+            if not isinstance(per_item, dict) or not all(isinstance(v, dict) for v in per_item.values()):
+                raise ValueError(f"{shape}; [{inst!r}] is {per_item!r}")
+            checked[inst] = {}
+            for item, values in per_item.items():
+                where = f"{_where(self, 'looks')}[{inst!r}][{item!r}]"
+                bad = [k for k in values if k not in LOOK_KEYS]
+                if bad:
+                    raise ValueError(f"{where}: unknown key {bad[0]!r}; valid: {', '.join(LOOK_KEYS)}")
+                probe = _LookProbe(where, **values, partial=True)
+                checked[inst][item] = {k: getattr(probe, k) for k in LOOK_KEYS if k in values}
+        self.looks = checked
 
     def unit_of(self, instance):
         return next((r[1] for r in self.instances if r[0] == instance), None)
@@ -773,6 +878,14 @@ class Assembly:
                         raise ValueError(
                             f"Layout {lay.name!r}: overrides[{inst!r}] names {item_name!r}, which is not a Part "
                             f"of unit {unit.name!r}"
+                        )
+            for inst, per_item in lay.looks.items():
+                unit = units[lay.unit_of(inst)]
+                for item_name in per_item:
+                    if unit.item(item_name) is None:
+                        raise ValueError(
+                            f"Layout {lay.name!r}: looks[{inst!r}] names {item_name!r}, which is not an item "
+                            f"of unit {unit.name!r}; items: {', '.join(i.name for i in unit.items)}"
                         )
             layout_items = {i.name: i for i in lay.items}
 
@@ -837,11 +950,11 @@ def grid(nx, ny, dx, dy, *, start=(0, 0, 0)) -> list[Location]:
 
 # Per declaration type: fields moved as points, fields turned as directions, fields that name other items.
 _PATTERN_FIELDS = {
-    Part: ((), (), ()),
-    StandIn: ((), (), ()),
-    Screw: (("origin",), ("direction",), ()),
-    Nut: (("origin",), ("direction",), ()),
-    Washer: (("origin",), ("direction",), ()),
+    Part: ((), ("explode",), ()),
+    StandIn: ((), ("explode",), ()),
+    Screw: (("origin",), ("direction", "explode"), ()),
+    Nut: (("origin",), ("direction", "explode"), ()),
+    Washer: (("origin",), ("direction", "explode"), ()),
     Bolted: ((), (), ("screw", "nut", "through", "washer", "nut_washer")),
     NutPocket: ((), (), ("nut", "part")),
     Snap: (("point",), ("normal", "insert_dir"), ("bump", "catch")),

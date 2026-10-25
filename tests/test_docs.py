@@ -158,3 +158,76 @@ def test_assemblies_reference_examples_match_api():
 
 def test_readme_mentions_assemblies():
     assert "print3d assemble" in read(REPO / "README.md")
+
+
+def test_example_config_mentions_blender():
+    text = read(SKILL / "config.example.toml")
+    assert '# blender = "C:/Program Files/Blender Foundation/Blender 4.5/blender.exe"' in text
+
+
+def test_setup_ps1_has_blender_step():
+    text = read(SKILL / "scripts" / "setup.ps1")
+    assert "find_blender" in text and "set_top_level_key" in text
+
+
+def test_readme_documents_blender():
+    text = read(REPO / "README.md")
+    assert "Blender" in text and "print3d render" in text
+
+
+RENDER_HEADINGS = ("When to render", "Running", "Declaring looks", "Exploded view", "Tool access",
+                   "Reading the images", "Opening the scene", "Agent workflow", "Limitations")
+
+
+def test_rendering_reference_sections():
+    text = read(SKILL / "references" / "rendering.md")
+    headings = re.findall(r"^#{1,3} (.+)$", text, re.MULTILINE)
+    for heading in RENDER_HEADINGS:
+        assert heading in headings, heading
+
+
+def test_rendering_reference_names_match_code():
+    import blender_scene
+    import print3d_assembly
+    import render_tools
+
+    text = read(SKILL / "references" / "rendering.md")
+    for name in (*blender_scene.VIEWS, *blender_scene.LIGHTINGS, *blender_scene.STATES, *print3d_assembly.MATERIALS):
+        assert f"`{name}`" in text, name
+    for flag in ("--final", "--draft", "--view", "--lighting", "--state", "--resolution", "--open", "--unit",
+                 "--layout", "--level", "--set", "--out", "--profile", "tool=False", "explode=", "looks=",
+                 "RENDER", "render.result.json", "cam-"):
+        assert flag in text, flag
+    assert str(render_tools.HEX_KEY["socket"]["M3"]) in text
+
+
+def test_skill_md_mentions_render():
+    text = read(SKILL / "SKILL.md")
+    assert "print3d render" in text and "references/rendering.md" in text
+    assert len(text.splitlines()) < 150
+    section = text.split("## 8. Render")[1]
+    assert len(section.strip().splitlines()) <= 8
+
+
+def test_assemblies_md_points_to_rendering():
+    text = read(SKILL / "references" / "assemblies.md")
+    for needle in ("material=", "explode=", "tool=False", "looks=", "rendering.md"):
+        assert needle in text, needle
+
+
+def test_templates_show_render_fields():
+    assert "material=" in read(SKILL / "templates" / "assembly_template.py")
+    assert "explode=" in read(SKILL / "templates" / "assembly_template.py")
+    assert "RENDER" in read(SKILL / "templates" / "model_template.py")
+
+
+def test_rendering_md_is_generic():
+    text = read(SKILL / "references" / "rendering.md")
+    # whole words: the state name "assembled" legitimately contains "led"
+    for word in ("LED", "LEDPanel", "tile", "zone"):
+        assert not re.search(rf"\b{word}s?\b", text, re.IGNORECASE), word
+
+
+def test_readme_blender_lookup_names_config_key():
+    lookup = next(line for line in read(REPO / "README.md").splitlines() if "looks for Blender" in line)
+    assert "`blender`" in lookup
